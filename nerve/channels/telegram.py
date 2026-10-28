@@ -1509,6 +1509,27 @@ class TelegramChannel(BaseChannel):
             return None
         return thread_id if self._topics_enabled() else None
 
+    @staticmethod
+    def _raw_topic(message: Any) -> int | None:
+        """The topic *message* sits in, whatever ``telegram.topics`` says.
+
+        Where a card or command physically is: notification deliveries are
+        recorded with the target they went to, and a sink topic is one-way
+        even with topics-as-sessions switched off.
+        """
+        thread_id = getattr(message, "message_thread_id", None)
+        if (
+            getattr(message, "is_topic_message", None) is not True
+            or type(thread_id) is not int
+            or thread_id == GENERAL_TOPIC_ID
+        ):
+            return None
+        return thread_id
+
+    def _answer_target(self, chat_id: int, message: Any) -> str:
+        """The delivery target that an answer typed or tapped in *message* matches."""
+        return format_target(chat_id, self._raw_topic(message))
+
     def _address_of(self, chat_id: int, message: Any) -> _Address:
         """The address of *message*, posted in the chat *chat_id*."""
         return _Address(chat_id, self._topic_of(message))
@@ -1731,10 +1752,10 @@ class TelegramChannel(BaseChannel):
             return
         if user.id == self._bot_id() or not self._is_authorized(user.id):
             return
-        if self._is_delivery_only_sink(chat) or not self._topics_enabled():
-            return
         thread_id = message.message_thread_id
         if type(thread_id) is not int or thread_id == GENERAL_TOPIC_ID:
+            return
+        if self._is_delivery_only_sink(chat, thread_id) or not self._topics_enabled():
             return
         topic = _Address(chat.id, thread_id)
         if message.forum_topic_created is not None:
@@ -2656,7 +2677,7 @@ class TelegramChannel(BaseChannel):
 
         return extract_zip(bytes(data), meta_line)
 
-    def _is_delivery_only_sink(self, chat: Any) -> bool:
+    def _is_delivery_only_sink(self, chat: Any, thread_id: int | None = None) -> bool:
         """True when ``chat`` is an opted-in group/supergroup notification sink.
 
         ``notifications.telegram_chat_id`` can be pointed at a dedicated group
@@ -2671,12 +2692,23 @@ class TelegramChannel(BaseChannel):
         private chat) stays interactive regardless. Inline-button callbacks are
         handled separately, so questions/approvals delivered here stay
         answerable.
+
+        With ``notifications.telegram_thread_id`` the sink is one topic, and
+        only that topic is one-way: the rest of the group stays interactive.
+        ``thread_id`` is the topic the update came from.
         """
         notif = self.config.notifications
         if not getattr(notif, "delivery_only_sink", False):
             return False
         notif_chat = notif.telegram_chat_id
-        return bool(notif_chat) and chat.id == notif_chat and chat.type in ("group", "supergroup")
+        if not (
+            bool(notif_chat)
+            and chat.id == notif_chat
+            and chat.type in ("group", "supergroup")
+        ):
+            return False
+        sink_thread = getattr(notif, "telegram_thread_id", None)
+        return sink_thread is None or sink_thread == thread_id
     @property
     def observation(self) -> ObservationPolicy:
         """The source grant, rebuilt per read so reloads apply at once."""
@@ -2829,7 +2861,9 @@ class TelegramChannel(BaseChannel):
 
         # Delivery-only notification sink: never start an agent turn on a
         # message that arrives in the notifications group (a one-way channel).
-        if self._is_delivery_only_sink(update.effective_chat):
+        if self._is_delivery_only_sink(
+            update.effective_chat, self._raw_topic(update.message),
+        ):
             logger.info(
                 "Ignoring inbound message in delivery-only notification chat %s",
                 update.effective_chat.id,
@@ -2993,6 +3027,14 @@ class TelegramChannel(BaseChannel):
         cached = self._message_cache.get((chat_id, message_id))
         if cached:
             thread_id, original_text = cached
+            # A one-way sink topic takes no reactions either; the check above
+            # covered a sink that is the whole chat.
+            if self._is_delivery_only_sink(reaction_update.chat, thread_id):
+                logger.info(
+                    "Ignoring reaction in the delivery-only notification topic "
+                    "%s of chat %s", thread_id, chat_id,
+                )
+                return
             if thread_id is not None and not self._topics_enabled():
                 thread_id = None
             text = f'[Reaction: {emoji_str} on message: "{original_text}"]'
@@ -3333,7 +3375,7 @@ class TelegramChannel(BaseChannel):
                 notification_id,
                 answer,
                 channel="telegram",
-                target=str(update.effective_chat.id),
+                target=self._answer_target(update.effective_chat.id, query.message),
                 actor=str(query.from_user.id),
             )
         except NotAcceptingTurnsError as exc:
@@ -3402,7 +3444,7 @@ class TelegramChannel(BaseChannel):
             result = await self._notification_service.answer_latest_question(
                 answer_text,
                 channel="telegram",
-                target=str(update.effective_chat.id),
+                target=self._answer_target(update.effective_chat.id, update.message),
                 actor=str(update.effective_user.id),
             )
         except NotAcceptingTurnsError as exc:

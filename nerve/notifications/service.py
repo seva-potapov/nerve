@@ -1128,6 +1128,37 @@ class NotificationService:
         logger.warning("No telegram_chat_id configured for notifications")
         return None
 
+    def _resolve_telegram_target(self) -> str | None:
+        """The configured sink as a channel target: the chat, or a topic in it."""
+        from nerve.channels.telegram import format_target
+
+        chat_id = self._resolve_telegram_chat_id()
+        if not chat_id:
+            return None
+        return format_target(chat_id, self.config.notifications.telegram_thread_id)
+
+    async def _telegram_topic_of(self, session_id: str) -> str | None:
+        """The topic a session lives in, as a channel target, or ``None``.
+
+        A session bound to a Telegram topic gets its pushes there, next to
+        the conversation they are about, rather than in the sink.
+        """
+        if not session_id or not self.config.telegram.topics.enabled:
+            return None
+        for key in await self.db.get_channel_keys_for_session(session_id):
+            channel, _, target = key.partition(":")
+            if channel == "telegram" and ":" in target:
+                return target
+        return None
+
+    def _labels_session(self, target: str) -> bool:
+        """Whether a card sent to *target* names its session.
+
+        Inside the session's own topic the topic is the label. The sink,
+        a topic included, gathers every session's pushes, so it keeps it.
+        """
+        return ":" not in target or target == self._resolve_telegram_target()
+
     def _get_telegram_channel(self):
         """Get the TelegramChannel instance, or None if unavailable."""
         channel = self.engine.router.get_channel("telegram")
@@ -1144,13 +1175,15 @@ class NotificationService:
 
     def _build_notification_text(
         self, session_id: str, title: str, body: str, priority: str,
+        *, label_session: bool = True,
     ) -> str:
         """Compose the chat message text for a notification.
 
         Shared by Telegram and Slack, and within each by the initial
         delivery, the re-delivery tick, and the expiry edit (which rebuilds
         the original text to append a status line). Markdown is converted
-        per channel at send time.
+        per channel at send time. ``label_session=False`` leaves out the
+        session footer, for a card inside the session's own topic.
         """
         priority_prefix = self.config.notifications.priority_prefixes.get(priority, "")
         if title:
@@ -1159,7 +1192,7 @@ class NotificationService:
                 text += f"\n\n{body}"
         else:
             text = body or ""
-        if self._should_show_session_label(session_id):
+        if label_session and self._should_show_session_label(session_id):
             text += f"\n\nSession: {session_id}"
         return text
 
@@ -1187,11 +1220,19 @@ class NotificationService:
             logger.warning("Telegram bot not available for notification %s", notification_id)
             return None
 
-        chat_id = self._resolve_telegram_chat_id()
-        if not chat_id:
+        target = (
+            await self._telegram_topic_of(session_id)
+            or self._resolve_telegram_target()
+        )
+        if not target:
             return None
+        from nerve.channels.telegram import parse_target
+        chat_id, thread_id = parse_target(target)
 
-        text = self._build_notification_text(session_id, title, body, priority)
+        text = self._build_notification_text(
+            session_id, title, body, priority,
+            label_session=self._labels_session(target),
+        )
 
         if notif_type in ("question", "approval") and options:
             button_labels: list[str | tuple[str, str]] = []
@@ -1208,6 +1249,7 @@ class NotificationService:
                     button_labels.append(value)
             msg_id = await self._send_telegram_inline(
                 chat_id, notification_id, text, button_labels, silent=silent,
+                thread_id=thread_id,
             )
         else:
             markup = None
@@ -1219,6 +1261,7 @@ class NotificationService:
                 )
             msg = await self._send_telegram_html(
                 bot, chat_id, text, reply_markup=markup, silent=silent,
+                thread_id=thread_id,
             )
             msg_id = str(msg.message_id)
 
@@ -1226,11 +1269,13 @@ class NotificationService:
         if msg_id:
             channel = self._get_telegram_channel()
             if channel:
-                channel._cache_message(int(msg_id), chat_id, text)
+                channel._cache_message(int(msg_id), chat_id, text, thread_id)
+            # The target names the topic too, so /reply and a button tap
+            # answer the card only where it was delivered.
             await self.db.record_notification_delivery(
                 notification_id,
                 "telegram",
-                target=str(chat_id),
+                target=target,
                 message_id=str(msg_id),
             )
 
@@ -1244,9 +1289,10 @@ class NotificationService:
         *,
         reply_markup: object | None = None,
         silent: bool = False,
+        thread_id: int | None = None,
     ) -> object:
         """Send a message with markdown→HTML conversion and plain-text fallback."""
-        from nerve.channels.telegram import _md_to_tg_html
+        from nerve.channels.telegram import _in_thread, _md_to_tg_html
         from telegram.constants import ParseMode
 
         html_text = _md_to_tg_html(text)
@@ -1256,12 +1302,14 @@ class NotificationService:
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
                 disable_notification=silent,
+                **_in_thread(thread_id),
             )
         except Exception:
             return await bot.send_message(
                 chat_id=chat_id, text=text,
                 reply_markup=reply_markup,
                 disable_notification=silent,
+                **_in_thread(thread_id),
             )
 
     async def _send_telegram_inline(
@@ -1271,6 +1319,7 @@ class NotificationService:
         text: str,
         options: list[str | tuple[str, str]],
         silent: bool = False,
+        thread_id: int | None = None,
     ) -> str | None:
         """Send Telegram message with inline keyboard buttons.
 
@@ -1307,6 +1356,7 @@ class NotificationService:
 
         msg = await self._send_telegram_html(
             bot, chat_id, text, reply_markup=keyboard, silent=silent,
+            thread_id=thread_id,
         )
 
         await self.db.update_notification(
@@ -1693,15 +1743,18 @@ class NotificationService:
         bot = self._get_telegram_bot()
         if not bot:
             return
-        chat_id = target or self._resolve_telegram_chat_id()
-        if not chat_id:
+        target = target or self._resolve_telegram_target()
+        if not target:
             return
+        from nerve.channels.telegram import parse_target
+        chat_id, _ = parse_target(target)
 
         text = self._build_notification_text(
             notif["session_id"],
             notif.get("title") or "",
             notif.get("body") or "",
             notif.get("priority") or "normal",
+            label_session=self._labels_session(target),
         )
         text += "\n\n⏰ Expired unanswered"
 
@@ -1710,13 +1763,13 @@ class NotificationService:
 
         try:
             await bot.edit_message_text(
-                chat_id=int(chat_id), message_id=int(message_id),
+                chat_id=chat_id, message_id=int(message_id),
                 text=_md_to_tg_html(text), parse_mode=ParseMode.HTML,
             )
         except Exception:
             try:
                 await bot.edit_message_text(
-                    chat_id=int(chat_id), message_id=int(message_id),
+                    chat_id=chat_id, message_id=int(message_id),
                     text=text,
                 )
             except Exception as exc:

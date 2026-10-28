@@ -3053,6 +3053,9 @@ class NotificationsConfig:
         default_factory=lambda: ["web", "telegram", "slack"],
     )
     telegram_chat_id: int | None = None       # Target chat; falls back to first allowed_user
+    # A topic in that chat for the pushes, e.g. a "System" topic. A session
+    # that lives in a topic of its own gets its pushes there instead.
+    telegram_thread_id: int | None = None
     # Opt-in, default off = backward compatible. When true AND telegram_chat_id
     # is a non-private group/supergroup, that chat is DELIVERY-ONLY: notifications
     # are still sent there, but inbound messages never start an agent turn. Leave
@@ -3078,6 +3081,7 @@ class NotificationsConfig:
         return cls(
             channels=d.get("channels", ["web", "telegram", "slack"]),
             telegram_chat_id=d.get("telegram_chat_id"),
+            telegram_thread_id=d.get("telegram_thread_id"),
             delivery_only_sink=d.get("delivery_only_sink", False),
             slack_channel_id=str(d.get("slack_channel_id") or ""),
             default_expiry_hours=d.get("default_expiry_hours", 48),
