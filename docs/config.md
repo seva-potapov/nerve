@@ -24,7 +24,7 @@ and migration splits a legacy `config.yaml` on the same table:
 | Layer | Gets |
 |-------|------|
 | `config.yaml` | `workspace`, `deployment`, `provider.aws_profile`, `gateway.ssl.*`, `proxy`, `docker`, `telegram.enabled`, `slack.enabled`, `sync.gmail.accounts`, `external_agents`, `mcp_endpoint`, `workflows.runs_dir` |
-| `settings.yaml` | `timezone`, `gateway.host`/`port`/`loop`, `provider.type`/`aws_region` (incl. the region-scoped Bedrock model IDs), `agent.*`, `memory.*`, `sessions.*`, `sync.*`, the rest of `workflows.*` (the budget caps and cadence), `houseofagents.*`, quiet hours, `telegram.dm_policy`/`stream_mode` |
+| `settings.yaml` | `timezone`, `gateway.host`/`port`/`loop`, `provider.type`/`aws_region` (incl. the region-scoped Bedrock model IDs), `agent.*`, `memory.*`, `sessions.*`, `sync.*`, the rest of `workflows.*` (the budget caps and cadence), `houseofagents.*`, quiet hours, `telegram.dm_policy`/`stream_mode`/`topics.*` |
 
 The test is whether the value would be wrong on another machine: filesystem
 paths, credential handles, whose mailboxes this person syncs, which agent
@@ -255,7 +255,7 @@ A reload is always explicit. Two things cause one:
 | `retention.*`, `backup.*`, and the `sessions.*` the background loops read | ✅ from the next cycle of that loop |
 | `external_agents.targets` (including each target's `enabled`), `.sync_interval_minutes`, `.conflict_policy` | ✅ from the next sweep, provided at least one target existed at startup (see the restart table) |
 | `sessions.sticky_period_minutes` | ✅ |
-| `telegram.dm_policy`, `.stream_mode` | ✅ read per update. Tightening `open` to `pairing` takes effect on the next message; `allowed_users` does not follow it (see the restart table) |
+| `telegram.dm_policy`, `.stream_mode`, `.topics.*` | ✅ read per update. Tightening `open` to `pairing` takes effect on the next message; `allowed_users` does not follow it (see the restart table) |
 | `slack.*` | ✅ `enabled` starts or stops the channel; same-workspace token changes reconnect and roll back on failure; other changes apply to the next event. In hosted mode `enabled: false` pauses intake, the records of a hosted GitHub source included, and notifications until it is `true` again, `source.*` applies to the next event, and `mode` needs a restart (see the restart table) |
 | `workflows.*` and `workflows.review_loop.*` — budget caps, concurrency, the warning fraction, iteration and criteria caps, leg engines/models, the verifier sandbox | ✅ read per use, by loops and runs already in flight as well as new ones. The two `enabled` flags and the two loop cadences are the exceptions; see the restart table |
 | `provider.*` and the API keys it selects (`aws_region`, `aws_profile`, `aws_access_key_id`, and the effective Anthropic key) | ✅ for sessions started **after** the reload. Each client's environment is built from the live reference when the session is created, by the same seam as `agent.*` below |
@@ -1184,6 +1184,39 @@ carry text. A `.png` or `.ico` has to be committed by a human.
 | `telegram.dm_policy` | string | `pairing` | `pairing` (allowlist + one-time pairing codes) or `open` (anyone — dangerous) |
 | `telegram.allowed_users` | list[int] | `[]` | User IDs allowed to use the bot in private and group chats |
 | `telegram.stream_mode` | string | `partial` | `partial` (edit msgs) or `full` |
+| `telegram.topics.enabled` | bool | `true` | One forum topic is one session (see [Topics](#topics)). `false` treats every topic message as a message to the chat, as before |
+
+### Topics
+
+In a chat with topics, each topic is its own session. A message in a topic
+goes to that topic's session, and the reply, the streamed preview, files,
+stickers and reactions come back to the same topic. The chat itself (for a
+forum, its General topic) keeps working as before: one session at a time,
+with the idle rollover of `sessions.sticky_period_minutes`.
+
+Telegram decides where topics exist, so that is where you turn them on:
+
+- **Group:** a forum supergroup (group settings → Topics). The bot needs to
+  see the messages: make it an admin, or disable privacy mode with BotFather.
+- **Private chat:** turn on topics for the bot in its BotFather settings
+  (Telegram added topics in private chats in Bot API 9.3).
+
+A topic stays bound to its session. It does not roll over to a fresh session
+after a quiet spell, because a topic that silently forgot its conversation
+would defeat the point. Inside a topic, `/new [title]` starts a new session
+for that topic only, `/session <id>` and the `/sessions` buttons bind the topic
+to another session, and `/stop` and `/star` act on the topic's session. Other
+topics and the chat itself are unaffected. If the topic's session is archived,
+the next message in the topic starts a new one.
+
+Telegram does not say which topic a reaction's message is in, so Nerve looks
+the message up in its recent-message cache (the last 200 messages). A reaction
+to a message that is no longer cached, in a chat that has topics, is ignored
+rather than sent to a session that never saw the message.
+
+Streaming edits share one budget per chat, because Telegram rate limits the
+chat rather than the topic. With several topics answering at once, the
+previews update less often, and the final answers are unaffected.
 
 ### Notification sink
 

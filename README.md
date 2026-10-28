@@ -133,6 +133,7 @@ Full React + Vite + TailwindCSS frontend served by FastAPI. Real-time streaming 
 Powered by `python-telegram-bot` v21+.
 
 - Streaming responses via edit-in-place
+- In a chat with topics, each topic is its own session
 - Inline keyboard buttons for interactive tool questions
 - `/reply` command for free-text answers
 - Configurable DM policy (`open` or `pairing`)
