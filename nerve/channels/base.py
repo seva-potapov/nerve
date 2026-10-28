@@ -32,6 +32,7 @@ class ChannelCapability(Flag):
     TYPING_INDICATOR = auto()   # Can show "typing…" status
     REACTIONS = auto()          # Can set emoji reactions on messages
     SEND_FILES = auto()         # Can deliver files / documents as attachments
+    SEND_IMAGES = auto()        # Can deliver images inline (not as document attachments)
 
 
 @dataclass(frozen=True)
@@ -289,3 +290,19 @@ class BaseChannel(abc.ABC):
         Telegram topic. The default does nothing.
         """
         return None
+
+    # ------------------------------------------------------------------ #
+    #  Optional: image delivery                                            #
+    #  Only called if channel declares ChannelCapability.SEND_IMAGES.      #
+    # ------------------------------------------------------------------ #
+
+    async def send_image(
+        self, target: str, *, file_path: str = "", url: str = "", caption: str = "",
+    ) -> bool:
+        """Deliver an image inline to a target.
+
+        Exactly one of *file_path* or *url* must be provided.
+        Returns True on successful delivery, False otherwise.
+        Only called if channel declares SEND_IMAGES capability.
+        """
+        return False
