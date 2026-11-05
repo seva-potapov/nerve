@@ -140,6 +140,9 @@ export interface Session {
   message_count?: number;
   total_cost_usd?: number;
   model?: string;
+  /** Reasoning effort picked for this chat (`low` … `max`); null/absent =
+      the server's default. Subagents the chat spawns inherit it. */
+  effort?: string | null;
   backend?: string;
   cwd?: string;
   // Real-time running status (set by backend + WS updates)
