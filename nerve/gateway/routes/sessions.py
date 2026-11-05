@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from nerve.agent.backends.base import BackendError
+from nerve.agent.effort import normalize_effort, session_effort
 from nerve.agent.interactive import get_awaiting_ids
 from nerve.config import get_config
 from nerve.gateway.auth import require_auth
@@ -91,6 +92,11 @@ class SessionCreateRequest(BaseModel):
     # header's model badge is right from the first render — per-message
     # overrides on the WS path can still change it later.
     model: str | None = None
+    # Reasoning effort for this session ("low" | "medium" | "high" | "xhigh" |
+    # "max"); empty/None = Default (agent.effort, or agent.cron_effort for
+    # cron/hook turns). Kept in metadata["effort"]; sub-agents the runtime
+    # starts inherit it unless a call asks for its own level.
+    effort: str | None = None
     cwd: str | None = None
     # Optional review loop attached at creation: this session becomes the
     # loop's observer (milestones land here; cwd is the shared workspace).
@@ -180,6 +186,13 @@ async def _pending_wakeup_map(deps) -> dict[str, dict]:
     return {r["session_id"]: r for r in rows if r.get("session_id")}
 
 
+def _with_effort(session: dict) -> dict:
+    """Expose the session's effort pick as a top-level ``effort`` field
+    (``None`` = Default), so clients never parse the metadata JSON."""
+    session["effort"] = session_effort(session)
+    return session
+
+
 async def _decorate(deps, sessions: list[dict]) -> list[dict]:
     """Attach the live per-row bits every sidebar list needs."""
     running_ids = deps.engine.sessions.get_running_ids()
@@ -190,6 +203,7 @@ async def _decorate(deps, sessions: list[dict]) -> list[dict]:
     # (with their own dot colour) instead of dropping them to idle.
     wakeups = await _pending_wakeup_map(deps)
     for s in sessions:
+        _with_effort(s)
         s["is_running"] = s["id"] in running_ids
         s["awaiting_input"] = s["id"] in awaiting_ids
         wakeup = wakeups.get(s["id"]) or {}
@@ -277,6 +291,10 @@ async def list_system_sessions(offset: int = 0, actor: Actor = Depends(require_a
 @router.post("/api/sessions")
 async def create_session(req: SessionCreateRequest, actor: Actor = Depends(require_auth)):
     deps = get_deps()
+    try:
+        effort = normalize_effort(req.effort)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     metadata = None
     if req.backend:
         backend = req.backend.strip().lower()
@@ -324,6 +342,8 @@ async def create_session(req: SessionCreateRequest, actor: Actor = Depends(requi
             except BackendError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
     model = requested_model or selected_backend.default_model(req.source)
+    if effort is not None:
+        metadata = {**(metadata or {}), "effort": effort}
     session_id = str(uuid.uuid4())[:8]
     session = await deps.engine.sessions.get_or_create(
         session_id, title=req.title, source=req.source, metadata=metadata,
@@ -332,7 +352,7 @@ async def create_session(req: SessionCreateRequest, actor: Actor = Depends(requi
     )
     if req.review_loop is not None:
         session = await _attach_review_loop(deps, session, session_id, cwd, req, actor)
-    return session
+    return _with_effort(dict(session))
 
 
 async def _attach_review_loop(
@@ -397,7 +417,7 @@ async def get_session(session_id: str, actor: Actor = Depends(require_auth)):
     session = await deps.db.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    return session
+    return _with_effort(session)
 
 
 @router.get("/api/sessions/{session_id}/messages")
@@ -445,7 +465,7 @@ async def _would_create_cycle(db, child_id: str, new_parent_id: str) -> bool:
 
 @router.patch("/api/sessions/{session_id}")
 async def update_session(session_id: str, req: dict, actor: Actor = Depends(require_auth)):
-    """Update session fields (title, starred, model, parent_session_id).
+    """Update session fields (title, starred, model, effort, parent_session_id).
 
     ``parent_session_id`` is the sidebar drag-to-nest relationship (null clears
     it → top-level). It is display-only: guarded against self/cycle links and
@@ -455,6 +475,13 @@ async def update_session(session_id: str, req: dict, actor: Actor = Depends(requ
     per-chat, not a global preference. The engine re-reads the session
     row each turn (per-message override -> ``sessions.model`` -> backend
     default), so the switch takes effect on the session's next message.
+
+    ``effort`` works the same way: a level sets this session's reasoning
+    effort, ``null`` or ``""`` goes back to Default. The next turn rebuilds
+    the runtime with it (the CLI takes ``--effort`` at start), and the
+    sub-agents it starts inherit it. Like a model switch it is refused with
+    409 ``live_background_agents`` while agents run, and a change records an
+    ``effort_changed`` session event.
 
     When ``sessions.star_project_hook`` is enabled (default off), a ``starred``
     0<->1 transition fires a one-shot internal turn in that same session so the
@@ -507,6 +534,29 @@ async def update_session(session_id: str, req: dict, actor: Actor = Depends(requ
             except BackendError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
         fields["model"] = requested_model
+    new_effort: str | None = None
+    effort_change = False
+    if "effort" in req:
+        try:
+            new_effort = normalize_effort(req["effort"])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        if new_effort != session_effort(session):
+            # An effort switch recreates the runtime like a model switch,
+            # so the same guard applies.
+            agents = getattr(deps.engine, "agents", None)
+            if agents is not None and agents.has_live(session_id):
+                live = agents.live_count(session_id)
+                raise HTTPException(status_code=409, detail={
+                    "code": "live_background_agents",
+                    "message": (
+                        f"{live} background agent(s) are still running in this "
+                        "session; changing the effort restarts its runtime and "
+                        "would stop them. Stop them or wait for them to finish."
+                    ),
+                    "live": live,
+                })
+            effort_change = True
     if "parent_session_id" in req:
         raw = req["parent_session_id"]
         new_parent = str(raw).strip() if raw not in (None, "") else None
@@ -540,7 +590,7 @@ async def update_session(session_id: str, req: dict, actor: Actor = Depends(requ
                        "message before un-nesting it",
             )
         fields["parent_session_id"] = new_parent
-    if not fields:
+    if not fields and "effort" not in req:
         raise HTTPException(status_code=400, detail="No valid fields to update")
     old_starred = int(session.get("starred") or 0)
     attribution = attribution_for(actor)
@@ -553,7 +603,12 @@ async def update_session(session_id: str, req: dict, actor: Actor = Depends(requ
         else:
             fields["status"] = "idle"
             fields["archived_at"] = None
-    await deps.db.change_session_fields(session_id, fields, attribution=attribution)
+    if fields:
+        await deps.db.change_session_fields(session_id, fields, attribution=attribution)
+    if effort_change:
+        await deps.db.set_session_effort(
+            session_id, new_effort, attribution=attribution,
+        )
     updated = await deps.db.get_session(session_id)
     # Star = opt-in project registration (sessions.star_project_hook, default
     # off). On a starred transition fire a one-shot internal turn.
@@ -582,7 +637,7 @@ async def update_session(session_id: str, req: dict, actor: Actor = Depends(requ
             )
         except Exception as e:  # a hook failure must never break the PATCH
             logger.warning("star-project hook failed for %s: %s", session_id, e)
-    return updated
+    return _with_effort(updated) if updated else updated
 
 
 @router.delete("/api/sessions/{session_id}")
@@ -678,7 +733,7 @@ async def fork_session(req: ForkRequest, actor: Actor = Depends(require_auth)):
             req.source_session_id, req.at_message_id, req.title,
             actor=actor,
         )
-        return fork
+        return _with_effort(dict(fork))
     except ValueError as e:
         status = 404 if "not found" in str(e).lower() else 409
         raise HTTPException(status_code=status, detail=str(e))
@@ -812,7 +867,7 @@ async def resume_session(session_id: str, actor: Actor = Depends(require_auth)):
         session = await deps.engine.resume_session(
             session_id, attribution=attribution_for(actor),
         )
-        return session
+        return _with_effort(session) if session else session
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

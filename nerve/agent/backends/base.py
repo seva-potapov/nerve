@@ -26,6 +26,8 @@ from nerve.agent.backends.events import AgentEvent
 SnapshotFn = Callable[[str, str, "str | None"], Awaitable[None]]
 # async (session_id, tool_input) -> None
 WakeupFn = Callable[[str, dict], Awaitable[Any]]
+# async (session_id, {"agent_id", "agent_type", "effort"}) -> None
+ObserveEffortFn = Callable[[str, dict], Awaitable[None]]
 
 
 class BackendError(Exception):
@@ -79,6 +81,10 @@ class SessionSpec:
     interactive: Any = None          # InteractionHub (typed Any to avoid cycles)
     snapshot: SnapshotFn | None = None
     record_wakeup: WakeupFn | None = None
+    # Called with (session_id, details) the first time the runtime reports
+    # the effort a turn or a sub-agent runs at (details: agent_id, agent_type,
+    # effort). Optional: a backend that can't observe it never calls it.
+    observe_effort: ObserveEffortFn | None = None
     cache_ttl: str = "5m"
     max_turns: int = 1000            # 0 = no cap
     idle_timeout: float = 900.0
