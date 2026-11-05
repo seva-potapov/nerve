@@ -385,9 +385,11 @@ export function ChatPage() {
               <SessionCreator actorId={activeSessionRow?.created_by_actor_id} />
               {(() => {
                 const model = activeSessionRow?.model;
+                // The chat's own effort, when it has one (Default adds nothing).
+                const effort = activeSessionRow?.effort;
                 return model ? (
                   <span className="hidden md:inline shrink-0 text-xs text-text-faint bg-surface-raised px-1.5 py-0.5 rounded">
-                    {formatModelLabel(model)}
+                    {formatModelLabel(model)}{effort ? ` · ${effort}` : ''}
                   </span>
                 ) : null;
               })()}
