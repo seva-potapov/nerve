@@ -117,6 +117,10 @@ export function handleSessionStatus(
       set((s) => ({ sessions: s.sessions.map(patch), searchResults: s.searchResults?.map(patch) ?? null }));
     }
   }
+  // Live cost: the running turn's latest estimate, and the agents' cost the
+  // billed total covers (for the estimate between turns).
+  if (msg.agents_cost_base != null) set({ agentsCostBase: msg.agents_cost_base });
+  set({ liveUsage: msg.is_running ? (msg.live_usage ?? get().liveUsage) : null });
   if (!msg.is_running) {
     // The turn on screen ended while the socket was down (a phone that slept,
     // a dropped network), so its done never came. Leave streaming mode and
