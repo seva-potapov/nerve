@@ -140,6 +140,10 @@ class SessionManager:
         # Callback for memorizing session before close/archive/delete.
         # Set by AgentEngine after init to wire up memU bridge.
         self._on_memorize: Any | None = None
+        # Called with the session id after an archive changed the status, in
+        # the background (``AgentEngine.session_ending``: channels let go of
+        # the session's topics).
+        self._on_archived: Any | None = None
 
     # ------------------------------------------------------------------ #
     #  Lifecycle: Create / Get                                             #
@@ -1012,6 +1016,13 @@ class SessionManager:
         )
         if archived:
             logger.info("Archived session %s", session_id)
+            if self._on_archived:
+                async def _archived_bg(sid: str = session_id) -> None:
+                    try:
+                        await self._on_archived(sid)
+                    except Exception as e:
+                        logger.warning("Archive hook for %s failed: %s", sid, e)
+                asyncio.create_task(_archived_bg())
         return archived
 
     async def _resolve_descendants(self, root_id: str) -> list[str]:

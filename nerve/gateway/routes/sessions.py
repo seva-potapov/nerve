@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from nerve.agent.backends.base import BackendError
 from nerve.agent.interactive import get_awaiting_ids
+from nerve.channels.session_events import SESSION_DELETED
 from nerve.config import get_config
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
@@ -608,6 +609,9 @@ async def delete_session(session_id: str, actor: Actor = Depends(require_auth)):
     db = deps.db
 
     if engine:
+        # Channels let go of the session first: its topic bindings go with
+        # the rows. Bounded and never raising (AgentEngine.session_ending).
+        await engine.session_ending(session_id, SESSION_DELETED)
         # Disconnect client
         client = engine.sessions.remove_client(session_id, reason="deleted")
         if client:
