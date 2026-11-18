@@ -215,6 +215,10 @@ class TurnCompleted:
     # Input tokens of the turn's last model call, when the backend knows them.
     # Without it, the context bar divides the turn's input by ``num_turns``.
     context_tokens: int | None = None
+    # Claude only: the CLI's ``modelUsage`` map (tokens and costUSD per
+    # model, cumulative per CLI process like ``total_cost_usd``). The
+    # engine diffs it into per-model rows (``nerve.db.model_pricing``).
+    model_usage: dict | None = None
     status: TurnStatus = "completed"
     error: str | None = None
 

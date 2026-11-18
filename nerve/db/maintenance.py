@@ -39,6 +39,7 @@ _TELEMETRY_TABLES: dict[str, str] = {
     "session_events": "created_at",
     "mcp_tool_usage": "created_at",
     "session_usage": "created_at",
+    "session_usage_models": "created_at",
     "memu_audit_log": "timestamp",
     # Sub-agent transcript items; the agent records themselves are kept for
     # the session's life.

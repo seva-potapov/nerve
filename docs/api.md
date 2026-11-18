@@ -2242,6 +2242,7 @@ Response: {
   "recent_cron_logs": [...],
   "usage": {
     "last_7d": { ... }, "daily": [...], "by_model": [...], "by_source": [...],
+    "effective_pricing": { "models": [ { "model": "claude-opus-5-5", "billed_usd": 20.0, "list_usd": 20.0, "billed_over_list": 1.0, "flags": [], ... } ], "coverage": 0.97, ... },
     "by_cron_job": [ { "job_id": "daily-digest", "runs": 7, "sessions": 7, "turns": 9, "input_tokens": 120, "cache_read": 410000, "cache_creation": 95000, "output_tokens": 5400, "cost_usd": 1.84, "estimated_cost_usd": 0.0, ... } ]
   }
 }
@@ -2268,6 +2269,37 @@ session, and workflow runs that began execution. Missed and skipped runs,
 and workflow runs that were cancelled while still queued, are not counted,
 so `cost_usd / runs` is the average cost per run. Jobs without usage are
 omitted.
+
+`usage.effective_pricing` compares, for each model over the same 7 days,
+what the agent runtime billed with the same tokens at Nerve's list prices.
+`null` when the query fails.
+
+- **Where the split comes from.** A turn's `cost_usd` covers every model
+  the turn used: sub-agents and the Claude CLI's own side calls are billed
+  to the same turn, which `by_model` labels with the main loop's model.
+  The split comes from the CLI's `modelUsage` on each turn result
+  (cumulative per CLI process; Nerve stores the difference per turn in
+  `session_usage_models`). Codex turns use one model and get one row.
+- **"Billed" is the runtime's own estimate, not the invoice.** The CLI
+  prices a model it has no price for as its default model, so a new
+  model can show billed below list until the CLI learns its price.
+- **Older turns.** Turns recorded before this table existed have no
+  split; their cost counts as `unattributed_usd`.
+
+| Field | Meaning |
+|---|---|
+| `models[]` | One row per model (grouped by the id the CLI priced it as) |
+| `models[].billed_usd` | The runtime's cost for the model |
+| `models[].list_usd` | The same tokens at `rates`. Cache writes use the 5-minute rate, because the per-model usage has no TTL split. `null` when the model is unpriced |
+| `models[].billed_over_list` | `billed_usd / list_usd` |
+| `models[].blended_usd_per_mtok` | Billed $ per million tokens of all types |
+| `models[].rates` | List rates in $ per million tokens, from `price_source`: `nerve` (`MODEL_PRICING`) or `codex.pricing`. No fallback to another model |
+| `models[].cli_rates` | The CLI's server price cache (`additionalModelCostsCache` in `~/.claude.json`), when it has the model |
+| `models[].effective_rates` | Each list rate times `billed_over_list`. The runtime bills per model, not per token type, so this is the only split the data allows |
+| `models[].flags` | `unpriced`, `only_cli_has_price`, `price_sources_disagree`, `billed_differs_from_list` (more than `ratio_tolerance` off), `long_prompt_tier` (a model with a higher price for long prompts, applied per request: `list_usd` is a lower bound) |
+| `billed_total_usd`, `attributed_usd`, `unattributed_usd`, `coverage` | Billed cost of all turns in the window, the part split by model, the rest, and the share split |
+| `turns`, `turns_attributed` | Turns in the window, and turns that have a split |
+| `cli_price_cache` | Whether the CLI's price cache was found |
 
 #### `GET /api/cron/jobs`
 The cron jobs and source runners, with their schedule and next run. Each job

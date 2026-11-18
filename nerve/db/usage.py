@@ -99,7 +99,7 @@ class UsageStore:
         num_turns: int = 1,
         web_search_requests: int = 0,
         web_fetch_requests: int = 0,
-    ) -> None:
+    ) -> int | None:
         """Record token usage for a single agent turn.
 
         ``cache_creation_5m`` and ``cache_creation_1h`` are the ephemeral
@@ -107,8 +107,11 @@ class UsageStore:
         ``usage.cache_creation``. They sum to ``cache_creation`` when the
         API returns the split; otherwise both default to 0 and only the
         aggregate is preserved.
+
+        Returns the new row's id (``session_usage.id``), which the turn's
+        per-model rows point to.
         """
-        await self._write(
+        result = await self._write(
             "INSERT INTO session_usage "
             "(session_id, input_tokens, output_tokens, "
             "cache_creation_input_tokens, cache_read_input_tokens, "
@@ -125,6 +128,90 @@ class UsageStore:
                 duration_api_ms, num_turns,
                 web_search_requests, web_fetch_requests,
             ),
+        )
+        return result.lastrowid
+
+    async def record_turn_model_usage(
+        self, usage_id: int | None, session_id: str, rows: list[dict],
+    ) -> None:
+        """Record a turn's usage split by model (``session_usage_models``).
+
+        *rows* come from ``nerve.db.model_pricing.turn_rows`` or
+        ``single_model_row``. Nothing is written for an empty list.
+        """
+        for row in rows:
+            await self._write(
+                "INSERT INTO session_usage_models "
+                "(usage_id, session_id, model, canonical_model, provider, "
+                "input_tokens, output_tokens, cache_read_tokens, "
+                "cache_creation_tokens, web_search_requests, cost_usd) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    usage_id, session_id, row["model"],
+                    row.get("canonical_model"), row.get("provider"),
+                    row["input_tokens"], row["output_tokens"],
+                    row["cache_read_tokens"], row["cache_creation_tokens"],
+                    row["web_search_requests"], row["cost_usd"],
+                ),
+            )
+
+    async def get_effective_pricing(
+        self,
+        days: int = 7,
+        *,
+        cli_prices: dict | None = None,
+        codex_pricing: dict | None = None,
+    ) -> dict:
+        """Billed vs list cost per model for the past N days.
+
+        See ``nerve.db.model_pricing.effective_pricing``. A model is
+        grouped under the id the CLI priced it as (``canonical_model``)
+        when the CLI reported one.
+        """
+        from nerve.db.model_pricing import effective_pricing
+
+        window = (f"-{days} days",)
+        async with self.db.execute(
+            """
+            SELECT
+                COALESCE(canonical_model, model) AS model,
+                MAX(provider) AS provider,
+                COUNT(DISTINCT usage_id) AS turns,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+                COALESCE(SUM(web_search_requests), 0) AS web_search_requests,
+                COALESCE(SUM(cost_usd), 0) AS cost_usd
+            FROM session_usage_models
+            WHERE created_at >= DATE('now', ?)
+            GROUP BY COALESCE(canonical_model, model)
+            """,
+            window,
+        ) as cursor:
+            rows = [dict(row) async for row in cursor]
+        async with self.db.execute(
+            """
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN cost_usd IS NOT NULL AND cost_usd > 0
+                                  THEN cost_usd
+                                  ELSE COALESCE(estimated_cost_usd, 0) END), 0),
+                COALESCE(SUM(EXISTS (SELECT 1 FROM session_usage_models m
+                                     WHERE m.usage_id = u.id)), 0)
+            FROM session_usage u
+            WHERE created_at >= DATE('now', ?)
+            """,
+            window,
+        ) as cursor:
+            turns, billed_total, attributed_turns = await cursor.fetchone()
+        return effective_pricing(
+            rows,
+            billed_total=float(billed_total or 0.0),
+            turns_total=int(turns or 0),
+            turns_attributed=int(attributed_turns or 0),
+            cli_prices=cli_prices,
+            codex_pricing=codex_pricing,
         )
 
     async def get_session_usage_totals(self, session_id: str) -> dict:

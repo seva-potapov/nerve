@@ -281,6 +281,8 @@ def translate_message(message: Any) -> list[ev.AgentEvent]:
             # Cumulative per CLI process — the engine diffs it
             # (cost_is_cumulative capability).
             total_cost_usd=getattr(message, "total_cost_usd", None),
+            # Cumulative per CLI process too; split by model.
+            model_usage=getattr(message, "model_usage", None) or None,
             duration_ms=getattr(message, "duration_ms", None),
             duration_api_ms=getattr(message, "duration_api_ms", None),
             num_turns=getattr(message, "num_turns", None),

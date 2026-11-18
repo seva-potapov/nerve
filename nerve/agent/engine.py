@@ -2163,8 +2163,9 @@ class AgentEngine:
             if not session:
                 return
             meta = json.loads(session.get("metadata") or "{}")
-            if meta.get("_sdk_cumulative_cost"):
+            if meta.get("_sdk_cumulative_cost") or meta.get("_sdk_cumulative_model_usage"):
                 meta["_sdk_cumulative_cost"] = 0
+                meta["_sdk_cumulative_model_usage"] = {}
                 await self.db.update_session_metadata(session_id, meta)
         except Exception as e:
             logger.warning(
@@ -3612,6 +3613,7 @@ class AgentEngine:
             "num_turns": event.num_turns,
             "context_window": event.context_window,
             "context_tokens": event.context_tokens,
+            "model_usage": event.model_usage,
             "status": event.status,
         }
         st.status, st.error = event.status, event.error
@@ -4034,7 +4036,9 @@ class AgentEngine:
             # * Codex: the backend returns THIS turn's nullable billed cost,
             #   explicit cost basis, and (for ChatGPT auth) a separate
             #   API-equivalent estimate. Cumulative bookkeeping stays untouched.
+            from nerve.db import model_pricing
             from nerve.db.usage import compute_turn_cost, extract_cache_ttl_split
+            model_rows: list[dict] = []
             sdk_cost = (st.result_meta or {}).get("total_cost_usd")
             current_session_cost = (
                 session_record.get("total_cost_usd", 0) if session_record else 0
@@ -4065,11 +4069,33 @@ class AgentEngine:
                     meta["_sdk_cumulative_cost"] = sdk_cost
                 cost_basis = "api_billed"
                 estimated_cost = None
+                # Same diff, split by model: the CLI's modelUsage covers
+                # sub-agents and its own side calls, which the turn row's
+                # single model label hides.
+                raw_model_usage = (st.result_meta or {}).get("model_usage")
+                if raw_model_usage:
+                    cur_snapshot = model_pricing.snapshot(raw_model_usage)
+                    model_rows = model_pricing.turn_rows(
+                        cur_snapshot, meta.get("_sdk_cumulative_model_usage"),
+                    )
+                    meta["_sdk_cumulative_model_usage"] = cur_snapshot
+                    attributed = sum(r["cost_usd"] for r in model_rows)
+                    if turn_cost is not None and abs(attributed - turn_cost) > 0.001:
+                        logger.warning(
+                            "Per-model cost %.4f != turn cost %.4f for %s "
+                            "(source %s); keeping both",
+                            attributed, turn_cost, session_id, cost_source,
+                        )
             else:
                 turn_cost = float(sdk_cost) if sdk_cost is not None else None
                 cost_source = (st.result_meta or {}).get("cost_basis") or "unknown"
                 cost_basis = cost_source
                 estimated_cost = (st.result_meta or {}).get("estimated_cost_usd")
+                model_rows = model_pricing.single_model_row(
+                    st.last_model, st.last_usage,
+                    turn_cost if turn_cost else estimated_cost,
+                    provider=self._backend_for_live_session(session_id).name,
+                )
 
             # Save metadata (includes _sdk_cumulative_cost update). The keys
             # of this turn go into the row as it is now, under the session's
@@ -4079,7 +4105,8 @@ class AgentEngine:
                 current = self._row_metadata(await self.db.get_session(session_id))
                 current.update({
                     key: meta[key]
-                    for key in ("last_usage", "observed_model", "_sdk_cumulative_cost")
+                    for key in ("last_usage", "observed_model", "_sdk_cumulative_cost",
+                                "_sdk_cumulative_model_usage")
                     if key in meta
                 })
                 await self.db.update_session_metadata(session_id, current)
@@ -4092,7 +4119,7 @@ class AgentEngine:
             cache_5m, cache_1h = extract_cache_ttl_split(st.last_usage)
 
             # Persist per-turn usage to session_usage table
-            await self.db.record_turn_usage(
+            usage_id = await self.db.record_turn_usage(
                 session_id=session_id,
                 input_tokens=st.last_usage.get("input_tokens", 0),
                 output_tokens=st.last_usage.get("output_tokens", 0),
@@ -4111,6 +4138,16 @@ class AgentEngine:
                 web_search_requests=web_search,
                 web_fetch_requests=web_fetch,
             )
+            if model_rows:
+                try:
+                    await self.db.record_turn_model_usage(
+                        usage_id, session_id, model_rows,
+                    )
+                except Exception as e:  # accounting must never break a turn
+                    logger.warning(
+                        "Failed to record per-model usage for %s: %s",
+                        session_id, e,
+                    )
 
             # Update total_cost_usd on the session
             await self.db.update_session_fields(session_id, {

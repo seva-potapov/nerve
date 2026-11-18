@@ -442,6 +442,7 @@ class SessionStore:
             await self.db.execute("DELETE FROM session_agent_events WHERE session_id = ?", (session_id,))
             await self.db.execute("DELETE FROM session_agents WHERE session_id = ?", (session_id,))
             await self.db.execute("DELETE FROM session_events WHERE session_id = ?", (session_id,))
+            await self.db.execute("DELETE FROM session_usage_models WHERE session_id = ?", (session_id,))
             await self.db.execute("DELETE FROM session_usage WHERE session_id = ?", (session_id,))
             await self.db.execute("DELETE FROM channel_sessions WHERE session_id = ?", (session_id,))
             # What the session's widgets saved goes with it.

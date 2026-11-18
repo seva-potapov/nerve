@@ -8,6 +8,7 @@ import { StatusBadge } from '../components/Cron/controls';
 import { httpLink } from '../utils/httpLink';
 import { totalInputTokens, type UsageTokens } from '../utils/usageTokens';
 import { langfuseProjectUrl } from '../utils/langfuseLinks';
+import { EffectivePricingTable } from '../components/Diagnostics/EffectivePricingTable';
 
 const INPUT_HEADER_TITLE = 'Uncached input + cache reads + cache writes';
 
@@ -237,6 +238,11 @@ export function DiagnosticsPage() {
                   </tbody>
                 </table>
               </div>
+            )}
+
+            {/* Billed vs list per model */}
+            {usage.effective_pricing?.models?.length > 0 && (
+              <EffectivePricingTable data={usage.effective_pricing} />
             )}
 
             {/* By source breakdown */}

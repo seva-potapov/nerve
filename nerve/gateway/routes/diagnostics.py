@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from nerve import boot
 from nerve.config import get_config
+from nerve.db.model_pricing import load_cli_prices
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
 from nerve.observability.langfuse import get_status as langfuse_status
@@ -69,6 +70,7 @@ async def diagnostics():
         model_usage_res,
         cron_job_usage_res,
         cache_ttl_rows_res,
+        effective_pricing_res,
     ) = await asyncio.gather(
         deps.db.get_cron_logs(limit=10),
         deps.db.get_known_source_names(),
@@ -82,6 +84,11 @@ async def diagnostics():
         deps.db.get_usage_by_model(days=7),
         deps.db.get_usage_by_cron_job(days=7),
         deps.db.get_cache_ttl_turn_rows(days=7),
+        deps.db.get_effective_pricing(
+            days=7,
+            cli_prices=load_cli_prices(),
+            codex_pricing=config.codex.pricing,
+        ),
         return_exceptions=True,
     )
 
@@ -111,6 +118,8 @@ async def diagnostics():
             "by_model": model_usage_res,
             # Optional breakdown: a failure here hides only this table.
             "by_cron_job": _ok(cron_job_usage_res, []),
+            # Billed vs list cost per model (nerve.db.model_pricing).
+            "effective_pricing": _ok(effective_pricing_res, None),
         }
         # Cache-TTL policy block: 1h write share + estimated savings vs a
         # pure-5m baseline (guardrail — see cache_policy.build_ttl_report).
