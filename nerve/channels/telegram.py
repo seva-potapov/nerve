@@ -17,7 +17,7 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -223,9 +223,14 @@ def _format_reply_context(message: Any) -> str:
 
     # Original message text
     original = getattr(reply, "text", None) or getattr(reply, "caption", None) or ""
+    shared = None if original else _location_parts(reply)
     if original:
         display = original if len(original) <= 500 else original[:500] + "…"
         parts.append(f'[Reply to {sender}: "{display}"]')
+    elif shared:
+        # A location has no text to quote; its coordinates are the content.
+        kind, details = shared
+        parts.append(f"[Reply to {sender}'s {kind.lower()}: {details}]")
     else:
         parts.append(f"[Reply to {sender}'s message]")
 
@@ -239,11 +244,106 @@ def _format_reply_context(message: Any) -> str:
     return "\n".join(parts)
 
 
+# Telegram's ``live_period`` for a live location shared "until I stop".
+_LIVE_PERIOD_FOREVER = 0x7FFFFFFF
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _coordinates(location: Any) -> str:
+    """``"<lat>, <lon>"``, plus the accuracy radius when Telegram gives one.
+
+    Empty when there are no numeric coordinates: no location at all, or a
+    stand-in object (a test's MagicMock) that only pretends to have one.
+    """
+    lat = getattr(location, "latitude", None)
+    lon = getattr(location, "longitude", None)
+    if not (_is_number(lat) and _is_number(lon)):
+        return ""
+    text = f"{lat:.6f}, {lon:.6f}"
+    accuracy = getattr(location, "horizontal_accuracy", None)
+    if _is_number(accuracy) and accuracy > 0:
+        text += f" (±{accuracy:.0f} m)"
+    return text
+
+
+def _live_period(location: Any) -> str:
+    """How long a live location is shared (``"for 15 min"``, ``"until stopped"``).
+
+    Empty for a static location. PTB reports ``live_period`` in seconds, or
+    as a timedelta when ``PTB_TIMEDELTA`` is set; both are read.
+    """
+    period = getattr(location, "live_period", None)
+    if isinstance(period, timedelta):
+        period = period.total_seconds()
+    if not _is_number(period) or period <= 0:
+        return ""
+    if period >= _LIVE_PERIOD_FOREVER:
+        return "until stopped"
+    minutes = max(1, round(period / 60))
+    if minutes < 60:
+        return f"for {minutes} min"
+    hours, rest = divmod(minutes, 60)
+    return f"for {hours} h {rest} min" if rest else f"for {hours} h"
+
+
+def _location_parts(message: Any) -> tuple[str, str] | None:
+    """A shared location or venue as ``(kind, details)``, or ``None``.
+
+    ``kind`` is ``"Location"``, ``"Live location"`` or ``"Venue"``. Telegram
+    sends coordinates, not a file, so nothing is downloaded. A venue message
+    carries a ``location`` as well, so the venue is read first.
+    """
+    venue = getattr(message, "venue", None)
+    where = _coordinates(getattr(venue, "location", None)) if venue else ""
+    if where:
+        title = getattr(venue, "title", None)
+        address = getattr(venue, "address", None)
+        names = [
+            name for name in (
+                f'"{title}"' if isinstance(title, str) and title else "",
+                address if isinstance(address, str) else "",
+            ) if name
+        ]
+        return "Venue", f"{', '.join(names)} at {where}" if names else where
+    location = getattr(message, "location", None)
+    where = _coordinates(location)
+    if not where:
+        return None
+    period = _live_period(location)
+    if not period:
+        return "Location", where
+    details = f"{where}, shared {period}"
+    heading = getattr(location, "heading", None)
+    if _is_number(heading):
+        details += f", heading {heading:.0f}°"
+    return "Live location", details
+
+
+def _format_location(message: Any) -> str:
+    """``[Location: <lat>, <lon>]`` (or a live location, or a venue), or ``""``.
+
+    A live location's later positions arrive as edits of the message, which
+    the channel does not handle, so the line says the session gets only this
+    one.
+    """
+    shared = _location_parts(message)
+    if not shared:
+        return ""
+    kind, details = shared
+    if kind == "Live location":
+        details += "; later positions are not passed on"
+    return f"[{kind}: {details}]"
+
+
 def _describe_telegram_attachment(message: Any) -> str:
     """Name a message's attachment without downloading it.
 
     An uncaptioned photo or sticker still says something. ``_extract_sticker``
-    and ``_extract_document`` say more but fetch the file to do it.
+    and ``_extract_document`` say more but fetch the file to do it. A
+    location is described in full: its coordinates are all there is.
     """
     sticker = getattr(message, "sticker", None)
     if sticker:
@@ -253,7 +353,7 @@ def _describe_telegram_attachment(message: Any) -> str:
         return f"[File: {document.file_name or 'unnamed'}]"
     if getattr(message, "photo", None):
         return "[Photo]"
-    return ""
+    return _format_location(message)
 
 
 # Inline-keyboard /sessions rendering ------------------------------------- #
@@ -881,8 +981,11 @@ class TelegramChannel(BaseChannel):
             "reply", self._source_routed_command(self._handle_reply),
         ))
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
+        # A live location's later positions arrive as edited messages; they
+        # match here too, and _handle_message ignores them (no update.message).
         app.add_handler(MessageHandler(
-            filters.TEXT | filters.PHOTO | filters.COMMAND | filters.Sticker.ALL | filters.Document.ALL,
+            filters.TEXT | filters.PHOTO | filters.COMMAND | filters.Sticker.ALL
+            | filters.Document.ALL | filters.LOCATION | filters.VENUE,
             self._handle_message,
         ))
         app.add_handler(MessageReactionHandler(self._handle_reaction))
@@ -2513,6 +2616,12 @@ class TelegramChannel(BaseChannel):
             text = f"{sticker_context}\n\n{text}" if text else sticker_context
         if sticker_image:
             images.append(sticker_image)
+
+        # Shared location or venue: coordinates, nothing to download. A
+        # replied-to location is in the reply context above.
+        location_context = _format_location(update.message)
+        if location_context:
+            text = f"{location_context}\n\n{text}" if text else location_context
 
         # Extract document/file if present
         doc_contents, doc_context = await self._extract_document(update.message)

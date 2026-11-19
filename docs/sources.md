@@ -594,8 +594,10 @@ resolved.
 `reply_to_message_id`. The parent message is not fetched.
 
 **Attachments are named, not fetched.** An upload contributes `[File: <name>]`,
-`[Photo]`, or `[Sticker: <emoji>]` ahead of any caption. A message with neither
-text nor an attachment is not collected.
+`[Photo]`, or `[Sticker: <emoji>]` ahead of any caption. A shared location
+contributes its coordinates, `[Location: <lat>, <lon>]` (or `[Venue: …]` or
+`[Live location: …]`). A message with neither text nor an attachment is not
+collected.
 
 ## Configuration
 
