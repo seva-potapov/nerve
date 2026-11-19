@@ -34,6 +34,11 @@ from nerve.channels.archives import (
     extract_zip,
 )
 from nerve.channels.access import Identity, PatternGate
+from nerve.channels.live_locations import (
+    LIVE_PERIOD_FOREVER,
+    LiveLocations,
+    live_period_seconds,
+)
 from nerve.channels.base import (
     BaseChannel,
     ChannelCapability,
@@ -244,10 +249,6 @@ def _format_reply_context(message: Any) -> str:
     return "\n".join(parts)
 
 
-# Telegram's ``live_period`` for a live location shared "until I stop".
-_LIVE_PERIOD_FOREVER = 0x7FFFFFFF
-
-
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -272,15 +273,12 @@ def _coordinates(location: Any) -> str:
 def _live_period(location: Any) -> str:
     """How long a live location is shared (``"for 15 min"``, ``"until stopped"``).
 
-    Empty for a static location. PTB reports ``live_period`` in seconds, or
-    as a timedelta when ``PTB_TIMEDELTA`` is set; both are read.
+    Empty for a static location.
     """
-    period = getattr(location, "live_period", None)
-    if isinstance(period, timedelta):
-        period = period.total_seconds()
-    if not _is_number(period) or period <= 0:
+    period = live_period_seconds(location)
+    if period is None:
         return ""
-    if period >= _LIVE_PERIOD_FOREVER:
+    if period >= LIVE_PERIOD_FOREVER:
         return "until stopped"
     minutes = max(1, round(period / 60))
     if minutes < 60:
@@ -322,19 +320,22 @@ def _location_parts(message: Any) -> tuple[str, str] | None:
     return "Live location", details
 
 
-def _format_location(message: Any) -> str:
+def _format_location(
+    message: Any, later: str = "later positions are not passed on",
+) -> str:
     """``[Location: <lat>, <lon>]`` (or a live location, or a venue), or ``""``.
 
-    A live location's later positions arrive as edits of the message, which
-    the channel does not handle, so the line says the session gets only this
-    one.
+    A live location's later positions arrive as edits of the message. A live
+    location's line ends with ``later``, which says what becomes of them: a
+    chat the agent works in keeps them for the next message, the source inbox
+    records only the first.
     """
     shared = _location_parts(message)
     if not shared:
         return ""
     kind, details = shared
     if kind == "Live location":
-        details += "; later positions are not passed on"
+        details += f"; {later}"
     return f"[{kind}: {details}]"
 
 
@@ -849,6 +850,9 @@ class TelegramChannel(BaseChannel):
         # prompts from the user who tapped Revise is revision feedback, not a
         # message for the agent (see _handle_message).
         self._plan_revise_prompts: dict[tuple[int, int], tuple[str, int, float]] = {}
+        # Live locations shared by the user: positions kept per chat, for the
+        # chat's next message (see _handle_message and _deliver_message).
+        self._live_locations = LiveLocations()
 
     def set_notification_service(self, service) -> None:
         """Wire the notification service for callback query handling."""
@@ -982,7 +986,7 @@ class TelegramChannel(BaseChannel):
         ))
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         # A live location's later positions arrive as edited messages; they
-        # match here too, and _handle_message ignores them (no update.message).
+        # match here too, and _handle_message keeps them without a turn.
         app.add_handler(MessageHandler(
             filters.TEXT | filters.PHOTO | filters.COMMAND | filters.Sticker.ALL
             | filters.Document.ALL | filters.LOCATION | filters.VENUE,
@@ -2533,7 +2537,17 @@ class TelegramChannel(BaseChannel):
         chat = update.effective_chat
         user = update.effective_user
         message = update.message
-        if chat is None or user is None or message is None:
+        if chat is None or user is None:
+            return
+        if message is None:
+            # A live location's later positions arrive as edits of its first
+            # message. None starts a turn: they are kept, and the chat's next
+            # message carries them. Any other edit is ignored.
+            edited = update.edited_message
+            if edited is not None and self._is_authorized(user.id):
+                self._live_locations.record(
+                    f"telegram:{chat.id}", edited, at=edited.edit_date,
+                )
             return
         # Two independent routes, as on Slack. Authorization decides the live
         # one; the source has its own grant and is asked either way, so a
@@ -2619,9 +2633,16 @@ class TelegramChannel(BaseChannel):
 
         # Shared location or venue: coordinates, nothing to download. A
         # replied-to location is in the reply context above.
-        location_context = _format_location(update.message)
+        location_context = _format_location(
+            update.message, later="later positions come with the user's next message",
+        )
         if location_context:
             text = f"{location_context}\n\n{text}" if text else location_context
+
+        # A new live location is kept; its later positions arrive as edits
+        # (see _handle_message). The message delivered below carries them.
+        channel_key = f"telegram:{chat_id}"
+        self._live_locations.record(channel_key, update.message)
 
         # Extract document/file if present
         doc_contents, doc_context = await self._extract_document(update.message)
@@ -2662,7 +2683,6 @@ class TelegramChannel(BaseChannel):
         # target skips the lookup altogether: a reply the user sent as
         # /new <text> must never be refused on its way to the session they
         # just asked for.
-        channel_key = f"telegram:{chat_id}"
         target_session: str | None = session_id
         if target_session is None and self._reply_routing_enabled():
             # Route a reply to the session that produced the replied-to message
@@ -2692,6 +2712,16 @@ class TelegramChannel(BaseChannel):
             update.message.message_id, chat_id,
             target_session or await self._delivery_session(None, channel_key),
         )
+
+        # The chat's live locations so far, built only now that the message
+        # is going out: an ended one is described once, then dropped. The
+        # message that is itself the live location says so on its own line.
+        live_context = self._live_locations.describe(
+            channel_key, _safe_zone(self.config.timezone),
+            skip=update.message.message_id,
+        )
+        if live_context:
+            text = f"{live_context}\n\n{text}" if text else live_context
 
         msg = InboundMessage(
             channel_name="telegram",

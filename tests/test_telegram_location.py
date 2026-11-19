@@ -4,7 +4,9 @@ Telegram sends a location as coordinates on the message, not as a file. The
 generic message handler takes it, and the agent gets a ``[Location: …]``
 line: on the message itself, in the reply context of a message that answers
 one, and in the source inbox's record of an observed group message. A live
-location's later positions arrive as edited messages, which are ignored.
+location's later positions arrive as edited messages, which start no turn;
+tests/test_telegram_live_locations.py covers how the next message carries
+them.
 """
 
 from datetime import timedelta
@@ -190,9 +192,10 @@ async def test_a_question_about_a_replied_to_location_carries_it(db):
 
 
 @pytest.mark.asyncio
-async def test_a_live_location_update_is_ignored(db):
+async def test_a_live_location_update_starts_no_turn(db):
     # A moving live location is an edit of the first message: update.message
-    # is None and the position is on update.edited_message.
+    # is None and the position is on update.edited_message. It is kept for
+    # the chat's next message, not delivered on its own.
     ch = _channel(db)
     update = MagicMock()
     update.effective_chat.id = _CHAT
