@@ -1354,6 +1354,19 @@ carry text. A `.png` or `.ico` has to be committed by a human.
 | `telegram.stream_mode` | string | `partial` | `partial` (edit msgs) or `full` |
 | `telegram.reply_routes_to_origin_session` | bool | `true` | A reply routes to the session that produced the replied-to message (and makes it active); a reply that cannot be tied to a live session is refused with a hint. `/new <message>` is the escape hatch: it starts a fresh session with that message, reply or not. `false` restores the old behaviour: a reply is context-only and lands in the active session. The message→session map is stored in the database (`channel_reply_routes`, kept 90 days) whether the flag is on or off, so it survives a restart and turning the flag back on covers earlier messages. Either way, a reply to a pending `ask_user` card answers the question, like `/reply` |
 
+### Voice, audio and video
+
+A voice note, round video, video or audio message, and audio or video sent as
+a file, is saved under [`media.save_dir`](#media-voice-audio-video) and
+transcribed locally, so the session gets text it can read: Claude takes no
+audio or video. A video also gives a few frames, passed on as images. A file
+over the Bot API's 20 MB download limit is described but not fetched. A
+later message from the same chat waits until the media before it is
+delivered, so the session reads them in the order they were sent.
+
+Any other message the bot cannot read (a contact, a poll, a dice roll, …)
+gets a short reply saying so, instead of being dropped.
+
 ### Notification sink
 
 The `notify` tool and async questions/approvals go to the owner's DM by default,
@@ -1439,6 +1452,60 @@ deny-eligible, where a spoofable name can only subtract access.
 
 **Never collected:** private chats, the bot's own messages, other bots, and
 `/pair` commands.
+
+## Media (voice, audio, video)
+
+How voice notes, audio and video received on Telegram reach the session.
+Each file is saved to
+`<save_dir>/telegram/<YYYY-MM-DD>/<chat>_<message>_<kind>.<ext>`, and the
+agent gets that path, a transcript, and for a video `video_frames` frames as
+images:
+
+```text
+[Voice message: 0:42, saved to /home/me/nerve-workspace/.media/telegram/2026-01-02/42_7_voice.oga]
+Transcript (automatic, en): Call me back when you land.
+```
+
+Transcription runs locally with
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper), in a child
+process started for each file, one file at a time. The model is in memory
+only while a file is being transcribed. Install it into a virtualenv of its
+own and point `media.transcription.python` at it, so its dependencies
+(CTranslate2, PyAV, onnxruntime) stay apart from Nerve's:
+
+```bash
+python3 -m venv ~/.nerve/whisper
+~/.nerve/whisper/bin/pip install "faster-whisper>=1.2,<2" "av<19"
+```
+
+```yaml
+media:
+  transcription:
+    python: ~/.nerve/whisper/bin/python
+```
+
+PyAV 19 breaks faster-whisper 1.2.1's audio decoding, hence the `av<19` pin.
+PyAV brings its own FFmpeg, so no system `ffmpeg` is needed. The model is
+downloaded from Hugging Face on first use (`large-v3-turbo`: 1.6 GB, about
+1.6 GB of RAM while it runs; a 66-second voice note takes about 21 s with 4
+CPU threads on an arm64 server). Smaller models need less: `small` about
+1 GB, `base` 0.6 GB, `tiny` 0.35 GB, and transcribe worse. Without
+faster-whisper the file is still saved and the agent is told why there is no
+transcript.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `media.save_dir` | path | `<workspace>/.media` | Where received files are saved |
+| `media.keep_days` | int | `30` | Day directories older than this are deleted when a new file is saved; `0` keeps everything |
+| `media.video_frames` | int | `4` | Frames taken from a video, evenly spaced, passed on as images (at most 16; `0` = none) |
+| `media.transcription.enabled` | bool | `true` | Transcribe voice, audio and the sound of a video |
+| `media.transcription.python` | path | Nerve's interpreter | Interpreter that has faster-whisper installed |
+| `media.transcription.model` | string | `large-v3-turbo` | faster-whisper model name, or a local model directory |
+| `media.transcription.model_dir` | path | Hugging Face cache | Download cache for a named model |
+| `media.transcription.compute_type` | string | `int8` | CTranslate2 compute type |
+| `media.transcription.threads` | int | `4` | CPU threads per transcription |
+| `media.transcription.language` | string | detect | Language code (`en`, `ru`, …); empty detects it per file |
+| `media.transcription.timeout_seconds` | int | `600` | A transcription that runs longer is stopped, and the agent is told |
 
 ## Slack
 

@@ -3441,6 +3441,68 @@ class ChannelsConfig:
 
 
 @dataclass
+class TranscriptionConfig:
+    """Local speech-to-text for received voice, audio and video (faster-whisper).
+
+    Each file is transcribed by a child process (``nerve/channels/media_worker.py``)
+    run with ``python``, one at a time, so the model is in memory only while a
+    file is being transcribed: about 1.6 GB for ``large-v3-turbo`` at int8.
+    ``python`` must have ``faster-whisper`` installed; the default is Nerve's
+    own interpreter. A separate virtualenv keeps faster-whisper's dependencies
+    (CTranslate2, PyAV, onnxruntime) apart from Nerve's.
+    """
+
+    enabled: bool = True
+    python: Path | None = None          # None = the interpreter Nerve runs on
+    model: str = "large-v3-turbo"       # a faster-whisper model name, or a model directory
+    model_dir: Path | None = None       # download cache for a named model; None = Hugging Face's
+    compute_type: str = "int8"
+    threads: int = 4
+    language: str = ""                  # "" = detect per file
+    timeout_seconds: int = 600
+
+    @classmethod
+    @_coerced
+    def from_dict(cls, d: dict) -> TranscriptionConfig:
+        return cls(
+            enabled=d.get("enabled", True),
+            python=_expand_path(d.get("python")),
+            model=str(d.get("model") or "large-v3-turbo"),
+            model_dir=_expand_path(d.get("model_dir")),
+            compute_type=str(d.get("compute_type") or "int8"),
+            threads=max(1, _lenient_int(d.get("threads"), 4)),
+            language=str(d.get("language") or ""),
+            timeout_seconds=max(10, _lenient_int(d.get("timeout_seconds"), 600)),
+        )
+
+
+@dataclass
+class MediaConfig:
+    """Voice, audio and video messages received on a channel (Telegram).
+
+    Each file is saved under ``save_dir`` (default ``<workspace>/.media``), so
+    the agent gets a path it can work with, and is transcribed; a video also
+    gives ``video_frames`` frames (at most 16), passed on as images. Saved files older than
+    ``keep_days`` are deleted when a new one is saved; 0 keeps them all.
+    """
+
+    save_dir: Path | None = None        # None = <workspace>/.media
+    keep_days: int = 30
+    video_frames: int = 4
+    transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
+
+    @classmethod
+    @_coerced
+    def from_dict(cls, d: dict) -> MediaConfig:
+        return cls(
+            save_dir=_expand_path(d.get("save_dir")),
+            keep_days=max(0, _lenient_int(d.get("keep_days"), 30)),
+            video_frames=max(0, _lenient_int(d.get("video_frames"), 4)),
+            transcription=TranscriptionConfig.from_dict(d.get("transcription") or {}),
+        )
+
+
+@dataclass
 class DockerConfig:
     """Docker deployment settings."""
 
@@ -4269,6 +4331,7 @@ class NerveConfig:
     auth: AuthConfig = field(default_factory=AuthConfig)
     setup: SetupConfig = field(default_factory=SetupConfig)
     channels: ChannelsConfig = field(default_factory=ChannelsConfig)
+    media: MediaConfig = field(default_factory=MediaConfig)
     notifications: NotificationsConfig = field(default_factory=NotificationsConfig)
     docker: DockerConfig = field(default_factory=DockerConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
@@ -4765,6 +4828,7 @@ class NerveConfig:
             auth=AuthConfig.from_dict(d.get("auth", {})),
             setup=SetupConfig.from_dict(d.get("setup") or {}),
             channels=ChannelsConfig.from_dict(d.get("channels", {})),
+            media=MediaConfig.from_dict(d.get("media") or {}),
             notifications=NotificationsConfig.from_dict(d.get("notifications", {})),
             docker=DockerConfig.from_dict(d.get("docker", {})),
             proxy=ProxyConfig.from_dict(d.get("proxy", {})),

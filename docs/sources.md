@@ -594,8 +594,10 @@ resolved.
 `reply_to_message_id`. The parent message is not fetched.
 
 **Attachments are named, not fetched.** An upload contributes `[File: <name>]`,
-`[Photo]`, or `[Sticker: <emoji>]` ahead of any caption. A message with neither
-text nor an attachment is not collected.
+`[Photo]`, `[Sticker: <emoji>]`, or a voice note, video or audio message with
+its length (`[Voice message: 0:42]`) ahead of any caption; nothing is
+transcribed for the inbox. A message with neither text nor an attachment is
+not collected.
 
 ## Configuration
 

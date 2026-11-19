@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import collections
+import contextlib
+import functools
 import html as _html
 import logging
 import re
@@ -17,16 +19,27 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    Audio,
+    Document,
+    ForceReply,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    Video,
+    VideoNote,
+    Voice,
+)
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, MessageReactionHandler, filters
 
 from nerve.agent.engine import NotAcceptingTurnsError
+from nerve.channels import media as channel_media
 from nerve.channels.archives import (
     IMAGE_EXT_TO_MIME,
     MAX_TEXT_SIZE,
@@ -239,21 +252,160 @@ def _format_reply_context(message: Any) -> str:
     return "\n".join(parts)
 
 
+# Voice, audio and video messages ------------------------------------------ #
+
+# Telegram's own media kinds: (message attribute, PTB type, what the agent is
+# told it is). Matched by type, so a test's MagicMock message, which answers
+# every attribute, carries none of them.
+_MEDIA_KINDS: tuple[tuple[str, type, str], ...] = (
+    ("voice", Voice, "Voice message"),
+    ("video_note", VideoNote, "Video message"),
+    ("video", Video, "Video"),
+    ("audio", Audio, "Audio"),
+)
+
+# The kinds with a picture: they give frames, and their transcript is of the sound.
+_PICTURE_KINDS = frozenset({"video", "video_note"})
+
+# Suffix of a saved file when neither its name nor Telegram's path gives one.
+_MEDIA_SUFFIX = {"voice": ".oga", "video_note": ".mp4", "video": ".mp4", "audio": ".mp3"}
+
+
+def _telegram_media(message: Any) -> tuple[str, Any] | None:
+    """``(kind, item)`` for a voice, round video, video or audio message."""
+    for attr, cls, _label in _MEDIA_KINDS:
+        item = getattr(message, attr, None)
+        if isinstance(item, cls):
+            return attr, item
+    return None
+
+
+def _media_label(kind: str) -> str:
+    return next(label for attr, _cls, label in _MEDIA_KINDS if attr == kind)
+
+
+def _seconds(value: Any) -> float | None:
+    """A Telegram duration in seconds (PTB gives a timedelta with PTB_TIMEDELTA)."""
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _media_facts(kind: str, item: Any) -> list[str]:
+    """What Telegram says about a file besides its length: an audio's title."""
+    if kind != "audio":
+        return []
+    title = getattr(item, "title", None)
+    performer = getattr(item, "performer", None)
+    name = getattr(item, "file_name", None)
+    if isinstance(title, str) and title:
+        by = f" by {performer}" if isinstance(performer, str) and performer else ""
+        return [f'"{title}"{by}']
+    if isinstance(name, str) and name:
+        return [name]
+    return []
+
+
+def _media_document_kind(message: Any) -> str:
+    """``"audio"`` or ``"video"`` for audio or video sent as a file, else ``""``."""
+    doc = getattr(message, "document", None)
+    if not isinstance(doc, Document):
+        return ""
+    return channel_media.media_kind(doc.mime_type or "", doc.file_name or "")
+
+
+def _carries_media(message: Any) -> bool:
+    """Whether ``message``, or the one it replies to, has sound or video to process."""
+    for m in (message, getattr(message, "reply_to_message", None)):
+        if m is not None and (_telegram_media(m) or _media_document_kind(m)):
+            return True
+    return False
+
+
+# Message kinds the channel does not read, for the reply that says so.
+# Checked in this order: a venue message carries a location as well.
+_UNSUPPORTED_KINDS: tuple[tuple[str, str], ...] = (
+    ("venue", "a venue"),
+    ("location", "a location"),
+    ("contact", "a contact"),
+    ("poll", "a poll"),
+    ("dice", "a dice roll"),
+    ("game", "a game"),
+    ("story", "a story"),
+    ("giveaway", "a giveaway"),
+    ("paid_media", "paid media"),
+    ("invoice", "an invoice"),
+)
+
+
+def _unsupported_kind(message: Any) -> str:
+    """What a message the channel cannot read is, in words."""
+    for attr, words in _UNSUPPORTED_KINDS:
+        if getattr(message, attr, None):
+            return words
+    return "this kind of message"
+
+
 def _describe_telegram_attachment(message: Any) -> str:
     """Name a message's attachment without downloading it.
 
     An uncaptioned photo or sticker still says something. ``_extract_sticker``
-    and ``_extract_document`` say more but fetch the file to do it.
+    and ``_extract_document`` say more but fetch the file to do it, as
+    ``_extract_media`` does for a voice note or a video.
     """
     sticker = getattr(message, "sticker", None)
     if sticker:
         return f"[Sticker: {sticker.emoji}]" if sticker.emoji else "[Sticker]"
+    found = _telegram_media(message)
+    if found:
+        kind, item = found
+        length = channel_media.format_duration(_seconds(getattr(item, "duration", None)))
+        return f"[{_media_label(kind)}: {length}]" if length else f"[{_media_label(kind)}]"
     document = getattr(message, "document", None)
     if document:
         return f"[File: {document.file_name or 'unnamed'}]"
     if getattr(message, "photo", None):
         return "[Photo]"
     return ""
+
+
+class _ArrivalOrder:
+    """Keeps a chat's messages in the order they were sent.
+
+    Saving and transcribing a voice note or a video takes seconds, and the bot
+    handles updates concurrently, so a text sent right after one would reach
+    the session first. A message that carries media becomes its chat's tail; a
+    later message from that chat waits until the tail is delivered before it
+    is routed. A message without media makes nobody wait.
+    """
+
+    def __init__(self) -> None:
+        self._tails: dict[int, asyncio.Future] = {}
+
+    def enter(
+        self, chat_id: int, *, slow: bool,
+    ) -> tuple[asyncio.Future | None, asyncio.Future | None]:
+        """``(before, mine)``: the tail to wait for, and this message's own
+        place as the new tail when it carries media (else ``None``)."""
+        before = self._tails.get(chat_id)
+        if before is not None and before.done():
+            before = None
+        mine = None
+        if slow:
+            mine = asyncio.get_running_loop().create_future()
+            self._tails[chat_id] = mine
+        return before, mine
+
+    def leave(self, chat_id: int, mine: asyncio.Future | None) -> None:
+        """The message is delivered, dropped or failed: release whoever waits."""
+        if mine is None:
+            return
+        if not mine.done():
+            mine.set_result(None)
+        if self._tails.get(chat_id) is mine:
+            del self._tails[chat_id]
 
 
 # Inline-keyboard /sessions rendering ------------------------------------- #
@@ -750,6 +902,13 @@ class TelegramChannel(BaseChannel):
         # message for the agent (see _handle_message).
         self._plan_revise_prompts: dict[tuple[int, int], tuple[str, int, float]] = {}
 
+    @functools.cached_property
+    def _arrivals(self) -> _ArrivalOrder:
+        """Keeps each chat's messages in the order they were sent, though a
+        voice note or a video takes a while to transcribe. Built on first use,
+        so a channel made without ``__init__`` has one too."""
+        return _ArrivalOrder()
+
     def set_notification_service(self, service) -> None:
         """Wire the notification service for callback query handling."""
         self._notification_service = service
@@ -882,8 +1041,16 @@ class TelegramChannel(BaseChannel):
         ))
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         app.add_handler(MessageHandler(
-            filters.TEXT | filters.PHOTO | filters.COMMAND | filters.Sticker.ALL | filters.Document.ALL,
+            filters.TEXT | filters.PHOTO | filters.COMMAND | filters.Sticker.ALL | filters.Document.ALL
+            | filters.VOICE | filters.AUDIO | filters.VIDEO | filters.VIDEO_NOTE,
             self._handle_message,
+        ))
+        # Whatever else a person sends (a contact, a poll, a dice roll, …) gets
+        # a short reply instead of being dropped without a word. Service
+        # messages and edits are not someone talking to the bot.
+        app.add_handler(MessageHandler(
+            filters.UpdateType.MESSAGE & ~filters.StatusUpdate.ALL,
+            self._handle_unsupported,
         ))
         app.add_handler(MessageReactionHandler(self._handle_reaction))
         app.add_error_handler(self._handle_error)
@@ -2254,6 +2421,19 @@ class TelegramChannel(BaseChannel):
         if mime in self._ARCHIVE_MIMES or ext == ".zip":
             return await self._extract_zip(doc, file_name, meta_line)
 
+        # -- Audio and video: saved, transcribed, a video's frames as images --
+        media_kind = _media_document_kind(message)
+        if media_kind:
+            return await self._save_and_analyze(
+                message, doc,
+                name=media_kind,
+                label="Document",
+                facts=[f"{file_name} ({size_str}, {mime or 'unknown type'})"],
+                picture=media_kind == "video",
+                duration=None,
+                suffix=ext,
+            )
+
         # -- Other binary files — metadata only --
         return [], meta_line
 
@@ -2274,6 +2454,154 @@ class TelegramChannel(BaseChannel):
             return [], meta_line
 
         return extract_zip(bytes(data), meta_line)
+
+    async def _extract_media(
+        self, message: Any, *, replied: bool = False,
+    ) -> tuple[list[dict[str, str]], str]:
+        """A voice note, round video, video or audio message, for the agent.
+
+        Returns ``(image_blocks, context_text)`` like ``_extract_document``.
+        The file is saved under ``media.save_dir`` so the agent gets a path,
+        and transcribed locally (Claude takes no audio or video); a video's
+        frames come back as image blocks. ``replied`` marks a file that is in
+        the replied-to message rather than in this one.
+        """
+        found = _telegram_media(message)
+        if not found:
+            return [], ""
+        kind, item = found
+        label = _media_label(kind)
+        if replied:
+            label = f"Replied-to {label[0].lower()}{label[1:]}"
+        name = getattr(item, "file_name", None)
+        return await self._save_and_analyze(
+            message, item,
+            name=kind,
+            label=label,
+            facts=_media_facts(kind, item),
+            picture=kind in _PICTURE_KINDS,
+            duration=_seconds(getattr(item, "duration", None)),
+            suffix=Path(name).suffix if isinstance(name, str) else "",
+        )
+
+    async def _save_and_analyze(
+        self,
+        message: Any,
+        item: Any,
+        *,
+        name: str,
+        label: str,
+        facts: list[str],
+        picture: bool,
+        duration: float | None,
+        suffix: str,
+    ) -> tuple[list[dict[str, str]], str]:
+        """Download ``item`` to the media directory, then transcribe and sample it.
+
+        A file over the Bot API's 20 MB download limit, or one that fails to
+        download, is described without its content, so the agent can say so.
+        """
+        media = self.config.media
+        size = getattr(item, "file_size", None)
+        size = size if isinstance(size, int) else 0
+        if size > self._MAX_DOWNLOAD_SIZE:
+            return [], channel_media.describe(
+                label, facts + [channel_media.format_size(size)], duration=duration,
+                note="Not downloaded: a bot can fetch files of up to 20 MB.",
+            )
+        chat_id = getattr(getattr(message, "chat", None), "id", None)
+        root = channel_media.media_root(self.config)
+        async with self._typing(chat_id):
+            try:
+                tg_file = await item.get_file()
+                if not suffix:
+                    suffix = Path(getattr(tg_file, "file_path", None) or "").suffix
+                path = channel_media.media_path(
+                    root, "telegram", chat_id, getattr(message, "message_id", 0), name,
+                    suffix or _MEDIA_SUFFIX.get(name, ""),
+                )
+                path.parent.mkdir(parents=True, exist_ok=True)
+                await tg_file.download_to_drive(path)
+            except Exception as e:
+                logger.warning("Failed to download Telegram %s: %s", name, e)
+                return [], channel_media.describe(
+                    label, facts, duration=duration, note=f"Not downloaded: {e}",
+                )
+            if media.keep_days:
+                await asyncio.to_thread(channel_media.prune, root, "telegram", media.keep_days)
+            transcribe = media.transcription.enabled
+            analysis = await channel_media.analyze(
+                path, media,
+                transcribe=transcribe,
+                frames=min(media.video_frames, channel_media.MAX_VIDEO_FRAMES) if picture else 0,
+            )
+        text = channel_media.describe(
+            label, facts,
+            duration=duration,
+            analysis=analysis,
+            saved=path,
+            transcription_enabled=transcribe,
+        )
+        return channel_media.frame_blocks(analysis), text
+
+    @contextlib.asynccontextmanager
+    async def _typing(self, chat_id: int | None):
+        """Show "typing…" in the chat while a file is downloaded and transcribed."""
+        if self._app is None or chat_id is None:
+            yield
+            return
+
+        async def _beat() -> None:
+            while True:
+                with contextlib.suppress(Exception):
+                    await self._app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+                await asyncio.sleep(4.5)  # Telegram shows the action for 5 s
+
+        task = asyncio.create_task(_beat())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def _wait_for_earlier(self, before: asyncio.Future | None) -> None:
+        """Wait until the chat's earlier voice note or video has been delivered."""
+        if before is None or before.done():
+            return
+        cap = self.config.media.transcription.timeout_seconds + 120
+        try:
+            await asyncio.wait_for(asyncio.shield(before), timeout=cap)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Telegram: an earlier media message is still in progress after %d s; "
+                "delivering the next one anyway", cap,
+            )
+
+    async def _handle_unsupported(self, update: Update, context: Any) -> None:
+        """Say a message can't be read, rather than ignore it.
+
+        Reached by whatever the message handler does not take: a contact, a
+        poll, a dice roll and the like. Only a user who may talk to the bot
+        gets the reply, and never in a delivery-only notification group.
+        """
+        self._touch()
+        message = update.message
+        user = update.effective_user
+        if message is None or user is None or user.is_bot:
+            return
+        if not self._is_authorized(user.id):
+            return
+        if self._is_delivery_only_sink(update.effective_chat):
+            return
+        kind = _unsupported_kind(message)
+        logger.info("Telegram: unsupported %s from chat %s", kind, update.effective_chat.id)
+        try:
+            await message.reply_text(
+                f"I can't read {kind} yet, so it didn't reach the session.",
+            )
+        except Exception:
+            logger.warning("Failed to answer an unsupported message in chat %s", update.effective_chat.id)
 
     def _is_delivery_only_sink(self, chat: Any) -> bool:
         """True when ``chat`` is an opted-in group/supergroup notification sink.
@@ -2425,13 +2753,33 @@ class TelegramChannel(BaseChannel):
         )
 
     async def _handle_message(self, update: Update, context: Any) -> None:
-        """Handle incoming text and photo messages — delegate to router."""
-        self._touch()
+        """Handle incoming messages — delegate to router, in arrival order.
+
+        A voice note or a video takes a while to save and transcribe, so a
+        later message from the same chat waits for it to be delivered before
+        it is routed (see ``_ArrivalOrder``). The place in line is taken here,
+        before the first ``await``, while updates are still in arrival order.
+        """
         chat = update.effective_chat
         user = update.effective_user
         message = update.message
         if chat is None or user is None or message is None:
+            self._touch()
             return
+        before, mine = self._arrivals.enter(
+            chat.id, slow=self._is_authorized(user.id) and _carries_media(message),
+        )
+        try:
+            await self._route_message(update, context, before)
+        finally:
+            self._arrivals.leave(chat.id, mine)
+
+    async def _route_message(
+        self, update: Update, context: Any, before: asyncio.Future | None,
+    ) -> None:
+        """The body of ``_handle_message``; ``before`` is the media message to wait for."""
+        self._touch()
+        user = update.effective_user
         # Two independent routes, as on Slack. Authorization decides the live
         # one; the source has its own grant and is asked either way, so a
         # group can feed the inbox whether or not its members may also drive
@@ -2471,10 +2819,12 @@ class TelegramChannel(BaseChannel):
 
         await self._deliver_message(
             update, update.message.text or update.message.caption or "",
+            before=before,
         )
 
     async def _deliver_message(
         self, update: Update, text: str, *, session_id: str | None = None,
+        before: asyncio.Future | None = None,
     ) -> None:
         """Turn one inbound message into an agent turn.
 
@@ -2484,7 +2834,9 @@ class TelegramChannel(BaseChannel):
         passes the session it just created, so the message gets there even as
         a reply — no routing lookup, no rejection. Otherwise a reply routes to
         the session that produced the replied-to message when routing is on,
-        and anything else lands in the chat's active session.
+        and anything else lands in the chat's active session. ``before`` is an
+        earlier voice note or video from the chat still being processed: the
+        session is picked only once it is delivered.
         """
         chat_id = update.effective_chat.id
 
@@ -2521,7 +2873,15 @@ class TelegramChannel(BaseChannel):
         if doc_contents:
             images.extend(doc_contents)
 
-        # Extract attachments from replied-to message (images, documents, PDFs)
+        # Voice, audio and video: saved, transcribed, a video's frames as images
+        media_contents, media_context = await self._extract_media(update.message)
+        if media_context:
+            text = f"{media_context}\n\n{text}" if text else media_context
+        if media_contents:
+            images.extend(media_contents)
+
+        # Extract attachments from replied-to message (images, documents, PDFs,
+        # voice, audio, video)
         reply_msg = getattr(update.message, "reply_to_message", None)
         if reply_msg:
             reply_image = await self._extract_image(reply_msg)
@@ -2532,9 +2892,17 @@ class TelegramChannel(BaseChannel):
                 text = f"{reply_doc_ctx}\n\n{text}" if text else reply_doc_ctx
             if reply_doc_contents:
                 images.extend(reply_doc_contents)
+            reply_media, reply_media_ctx = await self._extract_media(reply_msg, replied=True)
+            if reply_media_ctx:
+                text = f"{reply_media_ctx}\n\n{text}" if text else reply_media_ctx
+            if reply_media:
+                images.extend(reply_media)
 
         if not text and not images:
             return
+
+        # An earlier voice note or video from this chat goes first.
+        await self._wait_for_earlier(before)
 
         logger.info(
             "Telegram message from %s: %s%s",
@@ -2734,12 +3102,20 @@ class TelegramChannel(BaseChannel):
         if reply_context:
             text = f"{reply_context}\n\n{text}" if text else reply_context
 
-        # Download all images
+        # Download all images; save and transcribe each video, voice or audio
         images: list[dict[str, str]] = []
+        media_contexts: list[str] = []
         for u in updates:
             image = await self._extract_image(u.message)
             if image:
                 images.append(image)
+            media_contents, media_context = await self._extract_media(u.message)
+            if media_context:
+                media_contexts.append(media_context)
+            images.extend(media_contents)
+        if media_contexts:
+            joined = "\n\n".join(media_contexts)
+            text = f"{joined}\n\n{text}" if text else joined
 
         # Extract attachments from replied-to message (images, documents, PDFs)
         reply_msg = getattr(updates[0].message, "reply_to_message", None)

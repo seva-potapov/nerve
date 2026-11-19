@@ -520,6 +520,18 @@ _WORKING_DIR_PATH_KEYS: dict[tuple[str, ...], str] = {
         "directory the daemon was started in, and the API's containment check "
         "on run paths would be rooted there too"
     ),
+    ("media", "save_dir"): (
+        "every voice note, audio file and video received on a channel would be "
+        "saved in whatever directory the daemon was started in"
+    ),
+    ("media", "transcription", "python"): (
+        "the media worker would try to run a directory as its interpreter, so "
+        "no voice note, audio or video is transcribed"
+    ),
+    ("media", "transcription", "model_dir"): (
+        "faster-whisper would download its model (1.6 GB for the default one) "
+        "into whatever directory the daemon was started in"
+    ),
 }
 
 

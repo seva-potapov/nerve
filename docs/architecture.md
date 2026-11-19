@@ -106,6 +106,7 @@ Abstract communication layer with three components:
 
 - **Access matching** (`access.py`) — transport-neutral identity aliases and fail-closed allow/deny pattern matching. Channels compose these primitives into their own policy before creating an `InboundMessage`.
 - **Archives** (`archives.py`) — bounded one-level ZIP unpacking shared by Telegram and Slack. The download cap is on compressed bytes, so entry count, per-entry and aggregate uncompressed size, and compression ratio are all checked against the archive directory before an entry is read.
+- **Media** (`media.py`, `media_worker.py`) — received voice, audio and video: saved under `media.save_dir`, transcribed locally with faster-whisper, and for a video a few frames taken as images. The work runs in a child process started per file with `media.transcription.python`, one at a time, so neither the model nor its dependencies live in the daemon. See [config.md](config.md#media-voice-audio-video).
 
 Implementations:
 - **Telegram** — python-telegram-bot v21+ with partial message streaming (edit-in-place, 1.5s rate limit), inline keyboard buttons for notification questions, `/reply` command for free-text answers; a reply to a question card answers it too. With `telegram.reply_routes_to_origin_session`, a reply routes to the session that produced the replied-to message; the message→session map is the `channel_reply_routes` table (recorded whether or not the flag is on, pruned after 90 days by the maintenance tick), so it survives restarts
