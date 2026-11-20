@@ -91,7 +91,7 @@ session totals still come from the runtime and are not changed by it.
 
 | Action | What ends | Where |
 |---|---|---|
-| **Stop** (red button, Esc, WebSocket `stop`, channel `/stop`) | The orchestrator's current turn only. Background agents, workflows, shells and monitors keep running. With no turn running, nothing is sent | `POST /api/sessions/{id}/stop` `{"scope": "turn"}` |
+| **Stop** (red button, Esc Esc, WebSocket `stop`, channel `/stop`) | The orchestrator's current turn only. Background agents, workflows, shells and monitors keep running. With no turn running, nothing is sent. In the web UI, Esc stops only on a second press within 1000 ms (the first shows "Press Esc again to stop"; a held key counts once). The keyboard shortcuts dialog (`Cmd/Ctrl + /`) turns this off, back to one press, or changes the window (200–5000 ms); the choice is kept per browser in localStorage (`nerve-esc-stop`) | `POST /api/sessions/{id}/stop` `{"scope": "turn"}` |
 | **Stop one agent** | That agent, and the agents it started (deepest first). The turn and every other agent keep going | `POST /api/sessions/{id}/agents/{agent_id}/stop` |
 | **Stop all agents…** | Every live agent (shells and monitors optionally), then the turn. Task notifications the runtime already queued are dropped, so they cannot wake the orchestrator into relaunching | `{"scope": "all"}` |
 | **Force stop…** | Everything: the session's runtime is shut down (the next message starts a new one); every live agent ends as `interrupted` (`force_stop`) | `{"scope": "force"}` |

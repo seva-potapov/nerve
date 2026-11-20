@@ -1,4 +1,6 @@
+import { useId, useState } from 'react';
 import { useUIStore } from '../stores/uiStore';
+import { ESC_WINDOW_MAX_MS, ESC_WINDOW_MIN_MS, useEscStopStore } from '../stores/escStopStore';
 import { FOCUS_COMPOSER_COMBO, formatCombo, type ShortcutCombo } from '../utils/keyboard';
 import { Modal } from './ui/Modal';
 
@@ -32,7 +34,7 @@ const SECTIONS: Section[] = [
       { combo: { mod: true, shift: true, key: 'o' }, description: 'New chat' },
       { combo: { mod: true, key: 'k' }, description: 'Focus session search' },
       { combo: { mod: true, key: '/' }, description: 'Show keyboard shortcuts' },
-      { combo: { key: 'Escape' }, description: 'Close dialog · clear search · stop generation' },
+      { combo: { key: 'Escape' }, description: 'Close dialog · clear search' },
     ],
   },
   {
@@ -80,6 +82,7 @@ const SECTIONS: Section[] = [
 export function ShortcutsModal() {
   const open = useUIStore((s) => s.shortcutsModalOpen);
   const close = useUIStore((s) => s.closeShortcutsModal);
+  const double = useEscStopStore((s) => s.double);
 
   // The capture-phase Escape handling this component used to own is now
   // the Modal's job, along with the focus trap it never had.
@@ -101,7 +104,14 @@ export function ShortcutsModal() {
                   <Kbd combo={item.combo} label={item.label} />
                 </div>
               ))}
+              {section.title === 'General' && (
+                <div className="flex items-center justify-between gap-4 py-1">
+                  <span className="text-sm text-text-secondary">Stop generation</span>
+                  <kbd className={KBD_CLASS}>{double ? 'Esc Esc' : 'Esc'}</kbd>
+                </div>
+              )}
             </div>
+            {section.title === 'General' && <EscStopOptions />}
           </div>
         ))}
       </div>
@@ -109,9 +119,52 @@ export function ShortcutsModal() {
   );
 }
 
+/**
+ * How Escape stops a turn: two presses within the window (the default,
+ * 1000 ms) or one. Kept in this browser (`useEscStopStore`).
+ */
+function EscStopOptions() {
+  const { double, windowMs, setDouble, setWindowMs } = useEscStopStore();
+  const fieldId = useId();
+  const [draft, setDraft] = useState(String(windowMs));
+  const commit = () => {
+    const ms = Number(draft);
+    if (draft.trim() === '' || !Number.isFinite(ms)) setDraft(String(windowMs));
+    else { setWindowMs(ms); setDraft(String(useEscStopStore.getState().windowMs)); }
+  };
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-border-subtle px-3 py-2 text-sm text-text-secondary">
+      <label className="flex items-center gap-2">
+        <input type="checkbox" checked={double} onChange={(e) => setDouble(e.target.checked)} />
+        Stop needs a second Esc
+      </label>
+      <label htmlFor={fieldId} className="flex items-center gap-2">
+        within
+        <input
+          id={fieldId}
+          type="number"
+          inputMode="numeric"
+          min={ESC_WINDOW_MIN_MS}
+          max={ESC_WINDOW_MAX_MS}
+          step={100}
+          disabled={!double}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit(); } }}
+          className="w-20 rounded border border-border-subtle bg-surface px-2 py-0.5 text-sm tabular-nums disabled:opacity-50"
+        />
+        ms
+      </label>
+    </div>
+  );
+}
+
+const KBD_CLASS = 'px-2 py-1 text-xs leading-none font-mono text-text-secondary bg-surface border border-border-subtle rounded shrink-0 tabular-nums';
+
 function Kbd({ combo, label }: { combo: ShortcutCombo; label?: string }) {
   return (
-    <kbd className="px-2 py-1 text-xs leading-none font-mono text-text-secondary bg-surface border border-border-subtle rounded shrink-0 tabular-nums">
+    <kbd className={KBD_CLASS}>
       {label ?? formatCombo(combo)}
     </kbd>
   );

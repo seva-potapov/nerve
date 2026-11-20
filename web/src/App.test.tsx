@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Outlet } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthStatus } from './api/client';
 
 /** Startup routing waits for auth status even when a stored token exists. */
@@ -65,6 +65,7 @@ import App from './App';
 import { MOBILE_QUERY } from './hooks/useMediaQuery';
 import { useAuthStore } from './stores/authStore';
 import { useChatStore } from './stores/chatStore';
+import { ESC_STOP_KEY, useEscStopStore } from './stores/escStopStore';
 import { useSetupStore } from './stores/setupStore';
 import { makeExternalState, makeFreshState, makeState } from './test/setupFixtures';
 
@@ -595,5 +596,61 @@ describe('startup when the status call fails behind the gateway', () => {
 
     expect(await screen.findByLabelText('Password')).toBeInTheDocument();
     expect(useHostedStore.getState().mode).toBe('local');
+  });
+});
+
+describe('Escape stops a running turn', () => {
+  const chat = useChatStore.getState() as unknown as { isStreaming: boolean; stopSession: ReturnType<typeof vi.fn> };
+  const esc = (init: KeyboardEventInit = {}) => fireEvent.keyDown(document, { key: 'Escape', ...init });
+
+  beforeEach(async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    localStorage.removeItem(ESC_STOP_KEY);
+    useEscStopStore.setState({ double: true, windowMs: 1000, armedUntil: 0 });
+    authStatus.mockResolvedValue(status({ login: 'none', auth_required: false }));
+    chat.isStreaming = true;
+    renderApp();
+    await screen.findByText('the chat page');
+  });
+  afterEach(() => {
+    chat.isStreaming = false;
+    useEscStopStore.getState().disarm();
+    vi.useRealTimers();
+  });
+
+  it('takes two presses within the window, and the first shows a hint', () => {
+    esc();
+    expect(chat.stopSession).not.toHaveBeenCalled();
+    expect(screen.getByText(/again to stop/)).toBeInTheDocument();
+    esc();
+    expect(chat.stopSession).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/again to stop/)).not.toBeInTheDocument();
+  });
+
+  it('does not stop on two presses further apart than the window', () => {
+    esc();
+    act(() => { vi.advanceTimersByTime(1001); });
+    expect(screen.queryByText(/again to stop/)).not.toBeInTheDocument();
+    esc();
+    expect(chat.stopSession).not.toHaveBeenCalled();
+  });
+
+  it('does not count a held key as a second press', () => {
+    esc();
+    esc({ repeat: true });
+    expect(chat.stopSession).not.toHaveBeenCalled();
+  });
+
+  it('stops on one press when double press is off', () => {
+    act(() => { useEscStopStore.getState().setDouble(false); });
+    esc();
+    expect(chat.stopSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing while no turn runs', () => {
+    chat.isStreaming = false;
+    esc();
+    esc();
+    expect(chat.stopSession).not.toHaveBeenCalled();
   });
 });

@@ -6,6 +6,7 @@ import { ws } from './api/websocket';
 import { clearUnavailable, stopsApp, useHostedStore } from './api/hosted';
 import { useChatStore } from './stores/chatStore';
 import { useUIStore } from './stores/uiStore';
+import { useEscStopStore } from './stores/escStopStore';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { useIsMobile } from './hooks/useMediaQuery';
 import type { ShortcutDef } from './utils/keyboard';
@@ -37,6 +38,7 @@ import { SetupPage } from './pages/SetupPage';
 import { SettingsPage } from './pages/SettingsPage';
 import { BrowserAlerts } from './components/Notifications/BrowserAlerts';
 import { NotificationToast } from './components/Notifications/NotificationToast';
+import { EscStopHint } from './components/Chat/EscStopHint';
 import { SetupBanner } from './components/Setup/SetupBanner';
 import { SetupLanding } from './components/Setup/SetupLanding';
 import { ShortcutsModal } from './components/ShortcutsModal';
@@ -162,6 +164,7 @@ function App() {
       <SetupLanding />
       <SetupBanner />
       <ShortcutsModal />
+      <EscStopHint />
     </>
   );
 }
@@ -242,7 +245,12 @@ function GlobalShortcuts() {
         if (!useChatStore.getState().isStreaming) return false;
         return true;
       },
-      action: () => useChatStore.getState().stopSession(),
+      action: (e) => {
+        // A held key repeats keydown: that is one press, not two.
+        if (e.repeat) return;
+        // By default the first Escape only arms a second one (escStopStore).
+        if (useEscStopStore.getState().press() === 'stop') void useChatStore.getState().stopSession();
+      },
     },
   ], [navigate]);
 
