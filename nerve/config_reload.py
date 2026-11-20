@@ -49,6 +49,7 @@ _RESTART_ONLY_PATHS = (
     "external_agents.enabled",
     "gateway.host",
     "gateway.loop",
+    "gateway.reap_orphans",
     "gateway.port",
     "gateway.ssl.cert",
     "gateway.ssl.key",

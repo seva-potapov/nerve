@@ -995,6 +995,11 @@ class GatewayConfig:
     # Under Kubernetes, set it below terminationGracePeriodSeconds so the
     # shutdown that follows can finish. Read when the signal arrives.
     drain_timeout_seconds: int = 0
+    # When Nerve runs as PID 1 (a container without an init), collect the
+    # zombies of orphaned processes it inherits, every minute (see
+    # ``nerve/reaper.py``). Without an init nobody else does, and they pile
+    # up. A no-op when Nerve is not PID 1. Takes effect at startup only.
+    reap_orphans: bool = True
 
     @classmethod
     @_coerced
@@ -1019,6 +1024,7 @@ class GatewayConfig:
             loop=loop,
             drain_timeout_seconds=d.get("drain_timeout_seconds", 0),
             public_url=public_url,
+            reap_orphans=d.get("reap_orphans", True),
         )
 
 

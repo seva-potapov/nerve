@@ -286,6 +286,7 @@ reload cannot inspect, and are documented here only.
 |--------|-----|
 | `gateway.host`, `.port`, `.ssl.*` | the socket is already bound |
 | `gateway.loop` | the event loop is chosen when uvicorn starts. `asyncio` (the default) spawns subprocesses with `vfork()`; `uvloop` (also what `auto` picks when it is installed) uses a full `fork()`, which blocks the loop for seconds per spawn once the process is large |
+| `gateway.reap_orphans` | the orphan reaper starts with the gateway. On (the default), when Nerve runs as PID 1 (a container whose entrypoint execs `nerve start` and that has no init), it collects every minute the zombies of orphaned processes it inherits, each by its PID and only once it has outlived a whole sweep, so a child Nerve waits for is never taken (`nerve/reaper.py`). Not PID 1: nothing to do. `false` turns it off |
 | `timezone` | the cron scheduler and every trigger built from it carry the old zone |
 | `agent.max_concurrent` | its semaphore cannot be resized under in-flight turns |
 | `workspace` | the skill manager, the tool context, the memory bridges and each session's working directory all captured it at startup. Following it in one of them and not the others would be worse than not following it at all |

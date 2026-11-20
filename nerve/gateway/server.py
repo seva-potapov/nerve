@@ -987,6 +987,13 @@ async def lifespan(app: FastAPI):
         backup_task = asyncio.create_task(_periodic_backup(notification_service))
         startup_cleanups.append(("backup_task", backup_task.cancel))
 
+        # PID 1 in a container without an init: collect orphaned zombies.
+        reaper_task = None
+        if config.gateway.reap_orphans:
+            from nerve.reaper import run_orphan_reaper
+            reaper_task = asyncio.create_task(run_orphan_reaper())
+            startup_cleanups.append(("reaper_task", reaper_task.cancel))
+
         # Start the external-agents sync service. It re-renders
         # ~/.codex/AGENTS.md, ~/.claude/CLAUDE.md, etc. from the workspace
         # identity files on a timer (config.external_agents.sync_interval_minutes).
@@ -1154,6 +1161,8 @@ async def lifespan(app: FastAPI):
     db_retention_task.cancel()
     notify_maintenance_task.cancel()
     backup_task.cancel()
+    if reaper_task is not None:
+        reaper_task.cancel()
     idle_sweep_task.cancel()
     memorize_task.cancel()
     cleanup_task.cancel()
