@@ -1797,7 +1797,8 @@ export const api = {
     request<any>(`/sessions/${sessionId}/file-diff?path=${encodeURIComponent(path)}&context=${context}`),
 
   // Diagnostics
-  getDiagnostics: () => request<any>('/diagnostics'),
+  getDiagnostics: (usageDays?: number) =>
+    request<any>(`/diagnostics${usageDays ? `?usage_days=${usageDays}` : ''}`),
   getCronLogs: (jobId?: string, limit = 50, offset = 0, hideEmpty = false) =>
     request<{ logs: any[]; total: number; empty: number; limit: number; offset: number }>(
       `/cron/logs?job_id=${encodeURIComponent(jobId || '')}&limit=${limit}&offset=${offset}`

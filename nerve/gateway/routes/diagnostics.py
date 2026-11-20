@@ -8,7 +8,7 @@ import platform
 import shutil
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from nerve import boot
 from nerve.config import get_config
@@ -37,8 +37,13 @@ async def _per_source_status(db, source: str) -> tuple[str, dict]:
 
 
 @router.get("/api/diagnostics")
-async def diagnostics():
-    """System health and status information."""
+async def diagnostics(
+    usage_days: int = Query(7, ge=1, le=365),
+):
+    """System health and status information.
+
+    ``usage_days`` sets the window of the usage and cost section (default 7).
+    """
     deps = get_deps()
     config = get_config()
     from nerve.gateway.server import _cron_service, _memorize_stats
@@ -75,13 +80,13 @@ async def diagnostics():
         deps.db.count_sessions(),
         deps.db.get_sessions_needing_memorization(),
         deps.db.get_task_health_stats(),
-        deps.db.get_usage_summary(days=7),
-        deps.db.get_cache_hit_rate(days=7),
-        deps.db.get_usage_by_period(days=7),
-        deps.db.get_usage_by_source(days=7),
-        deps.db.get_usage_by_model(days=7),
-        deps.db.get_usage_by_cron_job(days=7),
-        deps.db.get_cache_ttl_turn_rows(days=7),
+        deps.db.get_usage_summary(days=usage_days),
+        deps.db.get_cache_hit_rate(days=usage_days),
+        deps.db.get_usage_by_period(days=usage_days),
+        deps.db.get_usage_by_source(days=usage_days),
+        deps.db.get_usage_by_model(days=usage_days),
+        deps.db.get_usage_by_cron_job(days=usage_days),
+        deps.db.get_cache_ttl_turn_rows(days=usage_days),
         return_exceptions=True,
     )
 
@@ -104,7 +109,8 @@ async def diagnostics():
                   source_usage_res, model_usage_res)
     ):
         usage_data = {
-            "last_7d": usage_summary_res,
+            "days": usage_days,
+            "summary": usage_summary_res,
             "cache_hit_rate": cache_stats_res,
             "daily": daily_usage_res,
             "by_source": source_usage_res,

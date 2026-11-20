@@ -334,4 +334,33 @@ class TestDiagnosticsRoute:
         usage = client.get("/api/diagnostics").json()["usage"]
         assert usage["by_cron_job"] == []
         assert usage["by_source"][0]["source"] == "cron"
-        assert usage["last_7d"]["turns"] == 1
+        assert usage["summary"]["turns"] == 1
+
+    async def test_usage_window_defaults_to_7_days(self, client, db: Database):
+        await _turn(db, "web-new", 1.0, source="web", days_ago=2)
+        await _turn(db, "web-old", 4.0, source="web", days_ago=20)
+
+        usage = client.get("/api/diagnostics").json()["usage"]
+        assert usage["days"] == 7
+        assert usage["summary"]["turns"] == 1
+        assert usage["summary"]["total_cost_usd"] == pytest.approx(1.0)
+
+    async def test_usage_days_widens_every_breakdown(self, client, db: Database):
+        await _turn(db, "web-new", 1.0, source="web", days_ago=2)
+        await _turn(db, "web-old", 4.0, source="web", days_ago=20)
+        await _turn(db, "web-ancient", 8.0, source="web", days_ago=60)
+
+        usage = client.get("/api/diagnostics?usage_days=30").json()["usage"]
+        assert usage["days"] == 30
+        assert usage["summary"]["turns"] == 2
+        assert usage["summary"]["total_cost_usd"] == pytest.approx(5.0)
+        assert sum(d["cost_usd"] for d in usage["daily"]) == pytest.approx(5.0)
+        assert usage["by_source"][0]["cost_usd"] == pytest.approx(5.0)
+        assert sum(m["cost_usd"] for m in usage["by_model"]) == pytest.approx(5.0)
+
+        wide = client.get("/api/diagnostics?usage_days=90").json()["usage"]
+        assert wide["summary"]["total_cost_usd"] == pytest.approx(13.0)
+
+    @pytest.mark.parametrize("bad", ["0", "-3", "366", "abc"])
+    async def test_usage_days_out_of_range_is_rejected(self, client, bad):
+        assert client.get(f"/api/diagnostics?usage_days={bad}").status_code == 422

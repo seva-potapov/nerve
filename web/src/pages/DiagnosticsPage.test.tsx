@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../api/client', () => ({
@@ -83,5 +83,44 @@ describe('DiagnosticsPage memory card', () => {
     expect(await screen.findByText('memU Memory Service')).toBeInTheDocument();
     expect(screen.getByText('DB Size')).toBeInTheDocument();
     expect(screen.queryByText(/MCP gateway/)).not.toBeInTheDocument();
+  });
+});
+
+describe('DiagnosticsPage usage window', () => {
+  const usage = (days: number) => ({
+    days,
+    summary: {
+      total_input: 1, total_cache_read: 0, total_cache_creation: 0, total_output: 1,
+      total_cost_usd: days === 30 ? 12.5 : 3.25, turns: 2, sessions: 1,
+    },
+    cache_hit_rate: { rate: 0 },
+    daily: [], by_model: [], by_source: [], by_cron_job: [],
+  });
+
+  beforeEach(() => {
+    vi.mocked(api.getDiagnostics).mockReset();
+    vi.mocked(api.getDiagnostics).mockImplementation(
+      async (days?: number) => ({ system: {}, usage: usage(days ?? 7) }),
+    );
+    vi.mocked(api.getCronLogs).mockResolvedValue({ logs: [], total: 0, empty: 0, limit: 30, offset: 0 });
+    vi.mocked(api.getMemuHealth).mockResolvedValue(null);
+    vi.mocked(api.listExternalAgents).mockResolvedValue({
+      enabled: false, sync_interval_minutes: 60, conflict_policy: 'skip', available: [], configured: [],
+    });
+  });
+
+  it('loads 7 days first and reloads with the window the button names', async () => {
+    render(<DiagnosticsPage />);
+
+    expect(await screen.findByText(/Usage & Cost \(7 days\)/)).toBeInTheDocument();
+    expect(screen.getByText('$3.25')).toBeInTheDocument();
+    expect(api.getDiagnostics).toHaveBeenLastCalledWith(7);
+
+    fireEvent.click(screen.getByRole('button', { name: '30d' }));
+
+    expect(await screen.findByText(/Usage & Cost \(30 days\)/)).toBeInTheDocument();
+    expect(screen.getByText('$12.50')).toBeInTheDocument();
+    expect(api.getDiagnostics).toHaveBeenLastCalledWith(30);
+    expect(screen.getByRole('button', { name: '30d' })).toHaveAttribute('aria-pressed', 'true');
   });
 });

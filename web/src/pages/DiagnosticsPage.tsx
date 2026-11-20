@@ -9,6 +9,8 @@ import { httpLink } from '../utils/httpLink';
 import { totalInputTokens, type UsageTokens } from '../utils/usageTokens';
 import { langfuseProjectUrl } from '../utils/langfuseLinks';
 
+const USAGE_WINDOWS = [7, 30, 90];
+
 const INPUT_HEADER_TITLE = 'Uncached input + cache reads + cache writes';
 
 function formatUptime(isoDate: string): string {
@@ -76,11 +78,12 @@ export function DiagnosticsPage() {
   const [cronLogs, setCronLogs] = useState<any[]>([]);
   const [memuHealth, setMemuHealth] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [usageDays, setUsageDays] = useState(7);
 
-  const load = async () => {
+  const load = async (days: number = usageDays) => {
     try {
       const [diag, logs, health] = await Promise.all([
-        api.getDiagnostics(),
+        api.getDiagnostics(days),
         api.getCronLogs(undefined, 30),
         api.getMemuHealth().catch(() => null),
       ]);
@@ -94,7 +97,7 @@ export function DiagnosticsPage() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(usageDays); }, [usageDays]);
 
   if (loading) return <div className="flex-1 flex items-center justify-center text-text-faint">Loading...</div>;
   if (!data) return <div className="flex-1 flex items-center justify-center text-hue-red">Failed to load</div>;
@@ -105,7 +108,7 @@ export function DiagnosticsPage() {
     <div className="h-full overflow-y-auto">
       <div className="border-b border-border-subtle px-6 py-3 flex items-center justify-between bg-bg shrink-0">
         <h1 className="text-lg font-semibold">Diagnostics</h1>
-        <IconButton label="Refresh diagnostics" onClick={load}>
+        <IconButton label="Refresh diagnostics" onClick={() => load()}>
           <RefreshCw size={16} />
         </IconButton>
       </div>
@@ -154,26 +157,43 @@ export function DiagnosticsPage() {
         )}
 
         {/* Usage & Cost */}
-        {usage?.last_7d && (
+        {usage?.summary && (
           <section>
             <h2 className="text-sm font-medium text-text-muted mb-3 flex items-center gap-2">
-              <DollarSign size={14} /> Usage & Cost (7 days)
+              <DollarSign size={14} /> Usage & Cost ({usage.days ?? usageDays} days)
+              <span className="ml-auto inline-flex gap-1" role="group" aria-label="Usage window">
+                {USAGE_WINDOWS.map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    aria-pressed={d === usageDays}
+                    onClick={() => setUsageDays(d)}
+                    className={`px-2 py-0.5 rounded text-xs font-normal border ${
+                      d === usageDays
+                        ? 'border-accent/50 text-text-secondary bg-accent/10'
+                        : 'border-border-subtle text-text-faint hover:text-text-secondary'
+                    }`}
+                  >
+                    {d}d
+                  </button>
+                ))}
+              </span>
             </h2>
 
             {/* Summary cards */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
               <InfoCard icon={BarChart3} label="Tokens (in/out)"
                 value={`${formatTokens(totalInputTokens({
-                  input_tokens: usage.last_7d.total_input,
-                  cache_read: usage.last_7d.total_cache_read,
-                  cache_creation: usage.last_7d.total_cache_creation,
-                }))} / ${formatTokens(usage.last_7d.total_output)}`} />
+                  input_tokens: usage.summary.total_input,
+                  cache_read: usage.summary.total_cache_read,
+                  cache_creation: usage.summary.total_cache_creation,
+                }))} / ${formatTokens(usage.summary.total_output)}`} />
               <InfoCard icon={DollarSign} label="Cost"
-                value={`$${usage.last_7d.total_cost_usd?.toFixed(2) ?? '0.00'}`} />
+                value={`$${usage.summary.total_cost_usd?.toFixed(2) ?? '0.00'}`} />
               <InfoCard icon={Zap} label="Cache Hit Rate"
                 value={`${((usage.cache_hit_rate?.rate ?? 0) * 100).toFixed(1)}%`} />
               <InfoCard icon={Activity} label="Turns / Sessions"
-                value={`${usage.last_7d.turns} / ${usage.last_7d.sessions}`} />
+                value={`${usage.summary.turns} / ${usage.summary.sessions}`} />
             </div>
 
             {/* Daily usage chart — simple CSS bar chart */}
@@ -203,7 +223,9 @@ export function DiagnosticsPage() {
                             </div>
                           </div>
                         </div>
-                        <span className="text-2xs text-text-faint tabular-nums">{dateLabel}</span>
+                        {usage.daily.length <= 31 && (
+                          <span className="text-2xs text-text-faint tabular-nums">{dateLabel}</span>
+                        )}
                       </div>
                     );
                   })}
