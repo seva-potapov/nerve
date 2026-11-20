@@ -143,8 +143,9 @@ class _Client:
         self.calls.append("context_usage")
         return self.report
 
-    async def start_compact(self):
+    async def start_compact(self, instructions=None):
         self.calls.append("start_compact")
+        self.instructions = instructions
 
     async def receive_turn(self):
         if self.hang:
@@ -301,8 +302,12 @@ async def test_compact_runs_as_a_turn_and_returns_the_new_context(api):
     assert SID in api.engine.sessions.get_idle_client_ids(1800)
     response = await api.client.post(f"/api/sessions/{SID}/compact")
     assert response.status_code == 200
-    assert response.json() == {"session_id": SID, "live": True, "can_compact": True, **COMPACTED}
+    assert response.json() == {
+        "session_id": SID, "live": True, "can_compact": True, **COMPACTED,
+        "compacted": {"trigger": "manual", "pre_tokens": 35177, "post_tokens": 2300},
+    }
     assert client.calls[0] == "start_compact"
+    assert client.instructions is None
 
     # A turn: the session ran and stopped; done carries the measured use.
     running = [
@@ -431,3 +436,94 @@ async def test_a_runtime_that_dies_during_a_compact_is_discarded(api):
     assert "without a result" in _detail(response)["message"]
     assert api.engine.sessions.get_client(SID) is None
     assert not api.engine.sessions.is_running(SID)
+
+
+# --------------------------------------------------------------------------- #
+#  Compact with instructions, and of a session without a live runtime         #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_compact_sends_its_instructions_on_one_line():
+    sdk = _FakeSDK()
+    await _claude(sdk).start_compact("keep the PR\n  numbers")
+    assert sdk.queries == ["/compact keep the PR numbers"]
+
+
+@pytest.mark.asyncio
+async def test_compact_passes_the_instructions_to_the_runtime(api):
+    client = _Client(_compact_frames())
+    api.engine.sessions.set_client(SID, client)
+    response = await api.client.post(
+        f"/api/sessions/{SID}/compact", json={"instructions": "  keep the\nPR numbers "},
+    )
+    assert response.status_code == 200
+    assert client.instructions == "keep the PR numbers"
+
+
+@pytest.mark.asyncio
+async def test_compact_instructions_over_the_limit_are_422(api):
+    from nerve.agent.engine import MAX_COMPACT_INSTRUCTIONS
+
+    client = _Client(_compact_frames())
+    api.engine.sessions.set_client(SID, client)
+    response = await api.client.post(
+        f"/api/sessions/{SID}/compact",
+        json={"instructions": "x" * (MAX_COMPACT_INSTRUCTIONS + 1)},
+    )
+    assert response.status_code == 422
+    assert _detail(response)["code"] == "invalid"
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_idle_session_with_a_conversation_can_compact(api):
+    await api.db.update_session_fields(SID, {"sdk_session_id": "native-1"})
+    body = (await api.client.get(f"/api/sessions/{SID}/context")).json()
+    assert (body["live"], body["can_compact"]) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_compact_of_an_idle_session_starts_its_runtime_first(api, monkeypatch):
+    await api.db.update_session_fields(SID, {"sdk_session_id": "native-1"})
+    client = _Client(_compact_frames())
+    started: list[tuple] = []
+
+    async def _start(session_id, source, model, effort_override=None):
+        started.append((session_id, source, model))
+        api.engine.sessions.set_client(session_id, client)
+        api.engine._session_backends[session_id] = "claude"
+        return client
+
+    monkeypatch.setattr(api.engine, "_get_or_create_client", _start)
+    response = await api.client.post(
+        f"/api/sessions/{SID}/compact", json={"instructions": "keep decisions"},
+    )
+    assert response.status_code == 200, response.text
+    assert started == [(SID, "web", None)]
+    assert client.calls[0] == "start_compact"
+    assert client.instructions == "keep decisions"
+    assert response.json()["compacted"]["post_tokens"] == 2300
+    assert len(await _compacted_events(api.db)) == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_of_an_idle_session_that_does_not_start_is_502(api, monkeypatch):
+    await api.db.update_session_fields(SID, {"sdk_session_id": "native-1"})
+
+    async def _fails(*_a, **_k):
+        raise RuntimeError("no CLI")
+
+    monkeypatch.setattr(api.engine, "_get_or_create_client", _fails)
+    response = await api.client.post(f"/api/sessions/{SID}/compact")
+    assert response.status_code == 502
+    assert "no CLI" in _detail(response)["message"]
+    assert await _compacted_events(api.db) == []
+
+
+@pytest.mark.asyncio
+async def test_an_idle_codex_session_cannot_compact(api):
+    await api.db.update_session_fields(SID, {"sdk_session_id": "native-1", "backend": "codex"})
+    response = await api.client.post(f"/api/sessions/{SID}/compact")
+    assert response.status_code == 409
+    assert _detail(response)["code"] == "unavailable"

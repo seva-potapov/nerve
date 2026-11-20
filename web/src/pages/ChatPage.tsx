@@ -619,6 +619,7 @@ function ChatPageView() {
               onStop={stopSession}
               isStreaming={isStreaming}
               seed={suggestedMessage}
+              onNavigate={navigate}
             />
           </div>
 

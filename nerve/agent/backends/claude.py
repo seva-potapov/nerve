@@ -1395,12 +1395,17 @@ class ClaudeClient(AgentClient):
             raise TransportDiedError(str(e)) from e
         return context_breakdown(report)
 
-    async def start_compact(self) -> None:
+    async def start_compact(self, instructions: str | None = None) -> None:
         # The CLI's own slash command, so not through _escape_slash. It ends
         # with one result. A ``compact_boundary`` system frame comes before
-        # the result only when the CLI compacted something.
+        # the result only when the CLI compacted something. Text after the
+        # command tells the CLI what the summary should keep (checked on CLI
+        # 2.1.310: the summary followed "Write the summary in French").
+        command = COMPACT_COMMAND
+        if instructions:
+            command = f"{COMPACT_COMMAND} {' '.join(instructions.split())}"
         try:
-            await self._sdk.query(COMPACT_COMMAND)
+            await self._sdk.query(command)
         except CLIConnectionError as e:
             raise TransportDiedError(str(e)) from e
 

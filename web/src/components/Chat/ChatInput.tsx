@@ -10,6 +10,11 @@ import { api } from '../../api/client';
 import { randomUUID } from '../../utils/uuid';
 import { findSessionById } from '../../utils/findSession';
 import { FOCUS_COMPOSER_COMBO, formatCombo } from '../../utils/keyboard';
+import {
+  argKind, commandMenuQuery, commandUsage, filterCommands, parseSlashInput, type SlashCommand,
+} from '../../utils/slashCommands';
+import { useCommandStore } from '../../stores/commandStore';
+import { runSlashCommand, type CommandContext, type CommandFeedback } from './slashCommandRunner';
 import { PromptRewriteCard } from './PromptRewriteCard';
 import { DaybreakToggle } from './DaybreakToggle';
 import { ModelSelector } from './ModelSelector';
@@ -67,7 +72,10 @@ interface AttachmentFile {
   error?: string;
 }
 
-export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }: {
+const COMMAND_MENU_ID = 'nerve-command-menu';
+const commandOptionId = (name: string) => `nerve-command-${name}`;
+
+export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null, onNavigate }: {
   onSend: (message: string, fileIds?: string[], imageBlocks?: Array<{ url: string; filename: string; media_type: string }>) => void;
   /** Stop the turn; the store's stop is async (it answers with what happened). */
   onStop: () => void | Promise<void>;
@@ -81,6 +89,8 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
    * overwrites a draft somebody typed.
    */
   seed?: string | null;
+  /** The router's navigate, for slash commands that open a page or a chat. */
+  onNavigate?: (to: string, options?: { replace?: boolean }) => void;
 }) {
   const [input, setInput] = useState('');
   const seedRef = useRef<string | null>(seed);
@@ -99,6 +109,17 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
   // prompts of this chat). -1 = not navigating (live draft); 0 = most recent.
   const historyIndexRef = useRef(-1);
   const historyStashRef = useRef('');
+
+  // ── Slash commands ──
+  // The menu shows while the text is `/word` at the very start. `cmdDismissed`
+  // holds the text that Escape (or a history recall) closed it for; typing
+  // anything else opens it again.
+  const commands = useCommandStore(s => s.commands);
+  const [cmdIndex, setCmdIndex] = useState(0);
+  const [cmdDismissed, setCmdDismissed] = useState<string | null>(null);
+  // What the last command did, for the chat it is about. Never sent to the model.
+  const [cmdStatus, setCmdStatus] = useState<(CommandFeedback & { sessionId: string }) | null>(null);
+  useEffect(() => { void useCommandStore.getState().load(); }, []);
 
   const quotes = useChatStore(s => s.quotes);
   const removeQuote = useChatStore(s => s.removeQuote);
@@ -207,6 +228,27 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
   // Switching the model recreates the runtime, which would end every live
   // agent of this session (the server refuses it too).
   const liveAgents = useAgentStore(s => (s.sessionId === activeSession ? s.summary.live : 0));
+
+  const cmdQuery = quotes.length === 0 ? commandMenuQuery(input) : null;
+  const cmdItems = cmdQuery !== null ? filterCommands(commands, cmdQuery) : [];
+  const cmdMenuOpen = cmdItems.length > 0 && cmdDismissed !== input;
+  const cmdSelected = cmdMenuOpen ? cmdItems[Math.min(cmdIndex, cmdItems.length - 1)] : null;
+  // Typing the arguments of a command: its usage line stands in for the menu.
+  const cmdTyping = !cmdMenuOpen && quotes.length === 0 ? /^\/(\S+)\s/.exec(input) : null;
+  const cmdHint = cmdTyping ? commands.find(c => c.name === cmdTyping[1] && c.args) ?? null : null;
+
+  // Success and info lines go after a while; an error stays until the next keystroke.
+  useEffect(() => {
+    if (!cmdStatus || cmdStatus.busy || cmdStatus.tone === 'error') return;
+    const timer = setTimeout(() => setCmdStatus(null), 8000);
+    return () => clearTimeout(timer);
+  }, [cmdStatus]);
+
+  // Keep the selected command in view in a menu that scrolls.
+  useEffect(() => {
+    if (!cmdSelected) return;
+    document.getElementById(commandOptionId(cmdSelected.name))?.scrollIntoView?.({ block: 'nearest' });
+  }, [cmdSelected]);
 
   const [prevQuoteCount, setPrevQuoteCount] = useState(0);
 
@@ -421,7 +463,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
     });
   }, []);
 
-  const composeMessage = (): string => {
+  const composeMessage = (text: string = input): string => {
     const parts: string[] = [];
     const ACTION_LABELS: Record<QuoteAction, string> = {
       add: 'Add', remove: 'Remove', improve: 'Improve', question: 'Question', note: 'Note',
@@ -434,8 +476,8 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
       parts.push(instr ? `${blockquote}\n${label}: ${instr}` : blockquote);
     }
 
-    if (input.trim()) {
-      parts.push(input.trim());
+    if (text.trim()) {
+      parts.push(text.trim());
     }
 
     return parts.join('\n\n');
@@ -507,8 +549,68 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
     }
   };
 
+  /** Clear the composer and run a slash command. Nothing goes to the model. */
+  const executeCommand = (command: SlashCommand, args: string) => {
+    cancelDraftFlush();
+    setInput('');
+    historyIndexRef.current = -1;
+    historyStashRef.current = '';
+    setDraft(activeSession, '');
+    setCmdDismissed(null);
+    setCmdIndex(0);
+    setCmdStatus(null);
+    const ctx: CommandContext = {
+      navigate: onNavigate ?? ((to) => window.location.assign(to)),
+      report: (feedback, sessionId) => setCmdStatus(feedback && {
+        ...feedback, sessionId: sessionId ?? useChatStore.getState().activeSession,
+      }),
+      models: pickableModels,
+      currentModel,
+      pickModel,
+      modelLocked: isStreaming
+        ? 'The model can change once the turn ends.'
+        : liveAgents > 0
+          ? `Switching model restarts the runtime and would stop ${liveAgents} running agent${liveAgents === 1 ? '' : 's'}.`
+          : null,
+    };
+    runSlashCommand(command, args, ctx).catch((e: unknown) => {
+      setCmdStatus({
+        tone: 'error',
+        text: e instanceof Error ? e.message : String(e),
+        sessionId: useChatStore.getState().activeSession,
+      });
+    });
+  };
+
+  /** Put `/name ` in the composer, for the arguments to follow. */
+  const completeCommand = (command: SlashCommand) => {
+    const text = `/${command.name} `;
+    setInput(text);
+    historyIndexRef.current = -1;
+    scheduleDraft(activeSession, text);
+    setCaretToEnd();
+  };
+
+  /** Enter (or a click) on a command of the menu. */
+  const chooseCommand = (command: SlashCommand) => {
+    if (argKind(command.args) === 'required') completeCommand(command);
+    else executeCommand(command, '');
+  };
+
   const handleSend = () => {
-    const message = composeMessage();
+    // A message is a command only when its first word is a command's name;
+    // `//` sends the text with one slash fewer. Quotes or attachments make
+    // it a message.
+    let text = input;
+    if (quotes.length === 0 && attachments.length === 0) {
+      const parsed = parseSlashInput(input, commands);
+      if (parsed.kind === 'command') {
+        executeCommand(parsed.command, parsed.args);
+        return;
+      }
+      text = parsed.text;
+    }
+    const message = composeMessage(text);
     if (!message && attachments.length === 0) return;
 
     // First message of a new chat with rewrite on → preview instead of send.
@@ -601,6 +703,35 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
     // Never intercept mid-IME-composition (Enter commits the candidate, etc.).
     if (e.nativeEvent.isComposing) return;
 
+    // The command menu takes the arrows, Tab, Enter and Escape while it shows.
+    if (cmdMenuOpen && cmdSelected) {
+      const plain = !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+      if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && plain) {
+        e.preventDefault();
+        const at = cmdItems.indexOf(cmdSelected);
+        const step = e.key === 'ArrowDown' ? 1 : -1;
+        setCmdIndex((at + step + cmdItems.length) % cmdItems.length);
+        return;
+      }
+      if (e.key === 'Tab' && plain) {
+        e.preventDefault();
+        completeCommand(cmdSelected);
+        return;
+      }
+      if (e.key === 'Escape') {
+        // Closes the menu only: not also the app-wide Escape that stops a turn.
+        e.preventDefault();
+        e.stopPropagation();
+        setCmdDismissed(input);
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey && (enterSends || e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        chooseCommand(cmdSelected);
+        return;
+      }
+    }
+
     if (e.key === 'Enter' && !e.shiftKey && (enterSends || e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       if (canSend) handleSend();
@@ -641,6 +772,7 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
         historyIndexRef.current = idx;
         e.preventDefault();
         setInput(history[idx]);
+        setCmdDismissed(history[idx]);
         setCaretToEnd();
       } else {
         if (historyIndexRef.current === -1) return;          // not navigating
@@ -648,13 +780,10 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
         e.preventDefault();
         const history = getPromptHistory();
         const idx = historyIndexRef.current;
-        if (idx <= 0) {
-          historyIndexRef.current = -1;
-          setInput(historyStashRef.current);                 // restore live draft
-        } else {
-          historyIndexRef.current = idx - 1;
-          setInput(history[idx - 1] ?? '');
-        }
+        const next = idx <= 0 ? historyStashRef.current : (history[idx - 1] ?? '');
+        historyIndexRef.current = idx <= 0 ? -1 : idx - 1;
+        setInput(next);                                      // the live draft at the end
+        setCmdDismissed(next);
         setCaretToEnd();
       }
     }
@@ -777,6 +906,19 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
       <div className="px-4 pt-2 pb-3">
         {/* Messages waiting for the running turn, and this tab's unconfirmed sends. */}
         <QueuedMessages />
+        {/* What the last slash command did. A live region, so it is read out. */}
+        <div role="status" aria-live="polite" className="empty:hidden mb-1.5 px-1">
+          {cmdStatus && cmdStatus.sessionId === activeSession && (
+            <p
+              className={`flex items-center gap-1.5 text-xs ${
+                cmdStatus.tone === 'error' ? 'text-error' : cmdStatus.tone === 'success' ? 'text-success' : 'text-text-muted'
+              }`}
+            >
+              {cmdStatus.busy && <Loader2 size={12} className="shrink-0 motion-safe:animate-spin" aria-hidden="true" />}
+              <span>{cmdStatus.text}</span>
+            </p>
+          )}
+        </div>
         {/* `relative` is the anchor for the run-later popup. The popup aligns
             to the right edge of the box and opens above it, so it stays in
             the viewport. */}
@@ -785,6 +927,48 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
           onMouseDown={focusFromBlank}
           className="relative cursor-text rounded-2xl border border-border bg-surface-raised transition-colors has-[textarea:focus]:border-accent/50"
         >
+          {/* The slash-command menu, above the box. ↑/↓ select, Tab
+              completes, Enter runs, Escape closes; the text keeps the focus. */}
+          {cmdMenuOpen && (
+            <div
+              id={COMMAND_MENU_ID}
+              role="listbox"
+              aria-label="Commands"
+              className="absolute left-0 right-0 bottom-full mb-1 z-50 max-h-72 overflow-y-auto bg-surface-raised border border-border-subtle rounded-lg shadow-xl py-1"
+            >
+              {cmdItems.map(c => {
+                const selected = c === cmdSelected;
+                return (
+                  <div
+                    key={c.name}
+                    id={commandOptionId(c.name)}
+                    role="option"
+                    aria-selected={selected}
+                    // Keeps the focus in the text while the pointer picks.
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setCmdIndex(cmdItems.indexOf(c))}
+                    onClick={() => chooseCommand(c)}
+                    className={`flex items-baseline gap-3 px-3 py-1.5 cursor-pointer text-sm ${selected ? 'bg-surface-hover text-text' : 'text-text-secondary'}`}
+                  >
+                    <span className="font-mono shrink-0">{commandUsage(c)}</span>
+                    <span className="min-w-0 truncate text-xs text-text-muted">{c.help}</span>
+                  </div>
+                );
+              })}
+              <div className="px-3 pt-1 pb-0.5 text-2xs text-text-faint border-t border-border mt-1">
+                ↑↓ select · Tab complete · Enter run · Esc close · // sends a slash
+              </div>
+            </div>
+          )}
+          {cmdHint && (
+            <div
+              aria-hidden="true"
+              className="absolute left-0 right-0 bottom-full mb-1 z-40 px-3 py-1.5 bg-surface-raised border border-border-subtle rounded-lg shadow text-xs pointer-events-none"
+            >
+              <span className="font-mono text-text-secondary">{commandUsage(cmdHint)}</span>
+              <span className="ml-3 text-text-muted">{cmdHint.help}</span>
+            </div>
+          )}
           {quotes.length > 0 && (
             <div data-composer-blank="" className="px-3 pt-3 space-y-2">
               {quotes.map((quote, idx) => (
@@ -813,11 +997,21 @@ export function ChatInput({ onSend, onStop, isStreaming, disabled, seed = null }
               id="nerve-chat-input"
               ref={textareaRef}
               value={input}
-              onChange={(e) => { const v = e.target.value; setInput(v); historyIndexRef.current = -1; scheduleDraft(activeSession, v); }}
+              onChange={(e) => {
+                const v = e.target.value;
+                setInput(v);
+                historyIndexRef.current = -1;
+                setCmdIndex(0);
+                if (cmdStatus && !cmdStatus.busy) setCmdStatus(null);
+                scheduleDraft(activeSession, v);
+              }}
               onFocus={() => setTextFocused(true)}
               onBlur={() => { setTextFocused(false); cancelDraftFlush(); setDraft(activeSession, input); }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              aria-autocomplete="list"
+              aria-controls={cmdMenuOpen ? COMMAND_MENU_ID : undefined}
+              aria-activedescendant={cmdSelected ? commandOptionId(cmdSelected.name) : undefined}
               // The label of the Enter key on an on-screen keyboard. It agrees
               // with what Enter does.
               enterKeyHint={enterSends ? 'send' : 'enter'}

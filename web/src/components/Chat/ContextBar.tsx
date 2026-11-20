@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, apiErrorDetail, type SessionContext } from '../../api/client';
+import { useUIStore } from '../../stores/uiStore';
 import { ContextPopover, type CompactState } from './ContextPopover';
 import { contextTokens, formatTokens, meterColor, type ContextUsage } from './contextUsage';
 
@@ -26,6 +27,27 @@ export function ContextBar({ usage, sessionId, backend, busy, sessionCostUsd }: 
   const [compact, setCompact] = useState<CompactState>({ step: 'idle' });
   const wrapRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  // Opened by the composer's `/context`: the popover takes the focus, and
+  // Escape hands it back to the composer rather than to this button.
+  const fromCommandRef = useRef(false);
+
+  // `/context` in the composer, and the context a `/compact` of this session
+  // measured. Only what happens while this meter is mounted counts: a
+  // session switch remounts it, and must not reopen it.
+  const usageRef = useRef(usage);
+  useEffect(() => { usageRef.current = usage; }, [usage]);
+  useEffect(() => useUIStore.subscribe((state, prev) => {
+    if (state.contextPopoverNonce !== prev.contextPopoverNonce) {
+      fromCommandRef.current = true;
+      setCompact(c => (c.step === 'running' ? c : { step: 'idle' }));
+      setOpen(true);
+      requestAnimationFrame(() => document.getElementById(POPOVER_ID)?.focus());
+    }
+    const snapshot = state.contextSnapshot;
+    if (snapshot && snapshot !== prev.contextSnapshot && snapshot.sessionId === sessionId) {
+      setLoaded({ usage: usageRef.current, context: snapshot.context });
+    }
+  }), [sessionId]);
 
   // Load the breakdown when the popover opens, and again after each turn.
   useEffect(() => {
@@ -53,7 +75,9 @@ export function ContextBar({ usage, sessionId, backend, busy, sessionCostUsd }: 
       e.preventDefault();
       e.stopPropagation();
       setOpen(false);
-      triggerRef.current?.focus();
+      if (fromCommandRef.current) document.getElementById('nerve-chat-input')?.focus();
+      else triggerRef.current?.focus();
+      fromCommandRef.current = false;
     };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey, true);
@@ -72,6 +96,7 @@ export function ContextBar({ usage, sessionId, backend, busy, sessionCostUsd }: 
   const pct = max > 0 ? Math.min((used / max) * 100, 100) : 0;
 
   const toggle = () => {
+    fromCommandRef.current = false;
     if (!open && compact.step !== 'running') setCompact({ step: 'idle' });
     setOpen(!open);
   };

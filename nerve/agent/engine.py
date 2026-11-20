@@ -171,12 +171,43 @@ class SessionClosedError(RuntimeError):
 _COMPACT_BOUNDARY = "compact_boundary"
 # A compact turn that ended with no such frame: the runtime had no messages.
 _NOTHING_TO_COMPACT = "Nothing to compact yet."
+# Longest compact instructions (``/compact <instructions>``) accepted.
+MAX_COMPACT_INSTRUCTIONS = 2000
+
+
+# The input-token fields of a turn's usage that fill the context window.
+_CONTEXT_INPUT_FIELDS = (
+    "input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+)
+
+
+def last_turn_context_totals(session: dict) -> dict:
+    """Totals from the session's last usage, as the context bar estimates
+    them: ``context_tokens`` (measured after a compact, or the last model
+    call's input on Codex), else the turn's input tokens divided by its model
+    calls."""
+    try:
+        meta = json.loads(session.get("metadata") or "{}")
+    except (TypeError, ValueError):
+        meta = {}
+    usage = meta.get("last_usage") or {}
+    total = usage.get("context_tokens")
+    if total is None:
+        used = sum(int(usage.get(k) or 0) for k in _CONTEXT_INPUT_FIELDS)
+        total = round(used / (usage.get("num_turns") or 1))
+    return {
+        "total_tokens": int(total),
+        "max_tokens": int(usage.get("max_context_tokens") or 0),
+        "auto_compact_threshold": None,
+        "categories": [],
+    }
 
 
 class CompactError(RuntimeError):
     """``AgentEngine.compact_session`` did not compact. ``code``:
-    ``unavailable`` (no live client that can compact), ``busy`` (a turn runs
-    or waits), ``nothing_to_compact``, ``stopped`` or ``failed``."""
+    ``invalid`` (instructions too long), ``unavailable`` (no runtime that can
+    compact, or no conversation), ``busy`` (a turn runs or waits),
+    ``nothing_to_compact``, ``stopped`` or ``failed``."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -418,6 +449,8 @@ class TurnResult:
 
     text: str
     outcome: TurnOutcome
+    # A compact turn: the runtime's report of the compact (pre/post tokens).
+    compact: dict[str, Any] | None = None
 
 
 @dataclass(eq=False)
@@ -3113,8 +3146,46 @@ class AgentEngine:
             logger.info("No context usage for session %s: %s", session_id, e)
             return None
 
-    async def compact_session(self, session_id: str, *, actor: Actor | None) -> None:
-        """Compact the conversation of the session's live client.
+    async def context_view(self, session_id: str) -> dict | None:
+        """What fills the session's context window: the live runtime's
+        breakdown by category, else the totals of the last turn
+        (:func:`last_turn_context_totals`). None: no such session. Shape of
+        ``GET /api/sessions/{id}/context``."""
+        session = await self.db.get_session(session_id)
+        if not session:
+            return None
+        live = await self.context_usage(session_id)
+        return {
+            "session_id": session_id,
+            "live": live is not None,
+            "can_compact": await self.compact_available(session_id),
+            **(live or last_turn_context_totals(session)),
+        }
+
+    async def compact_available(self, session_id: str) -> bool:
+        """Whether :meth:`compact_session` can run for the session: a live
+        client that can compact (:meth:`can_compact`), or no live client but
+        a runtime that can compact and a conversation to resume. The compact
+        then starts the client first."""
+        if self.sessions.get_client(session_id) is not None:
+            return self.can_compact(session_id)
+        session = await self.db.get_session(session_id)
+        if not session:
+            return False
+        try:
+            backend = self._backend_for(session, session.get("source") or "web")
+        except RuntimeError:
+            return False
+        if not backend.capabilities.supports_compact:
+            return False
+        # A fork that has not run yet branches from its source's conversation.
+        return bool(session.get("sdk_session_id") or session.get("fork_source_native_id"))
+
+    async def compact_session(
+        self, session_id: str, *, actor: Actor | None,
+        instructions: str | None = None,
+    ) -> dict[str, Any]:
+        """Compact the conversation of the session.
 
         The compact runs as a turn: it takes the run lock, the session shows
         as running, and Stop reaches it. Its frames are not shown and it adds
@@ -3124,12 +3195,27 @@ class AgentEngine:
         records ``compacted`` with ``actor`` as actor and cause; a compact
         that stops, fails or has nothing to compact records no event.
 
+        A session without a live client gets one first: the runtime resumes
+        the conversation, then compacts it. ``instructions`` (one line, at
+        most :data:`MAX_COMPACT_INSTRUCTIONS` characters) tell the runtime
+        what the summary should keep.
+
+        Returns:
+            The runtime's report of the compact (``pre_tokens``,
+            ``post_tokens`` and more on Claude), or ``{}`` when it gave none.
+
         Raises:
             CompactError: the session did not compact (see its ``code``).
         """
-        if not self.can_compact(session_id):
+        instructions = " ".join((instructions or "").split()) or None
+        if instructions and len(instructions) > MAX_COMPACT_INSTRUCTIONS:
             raise CompactError(
-                "unavailable", "Compact needs a running Claude session.",
+                "invalid",
+                f"Compact instructions are limited to {MAX_COMPACT_INSTRUCTIONS} characters.",
+            )
+        if not await self.compact_available(session_id):
+            raise CompactError(
+                "unavailable", "Compact needs a Claude session with a conversation.",
             )
         lock = self._session_locks.get(session_id)
         if (
@@ -3138,15 +3224,19 @@ class AgentEngine:
             or self._queue_state()[0].get(session_id)
         ):
             raise CompactError("busy", "The agent is busy. Try again when the turn ends.")
-        result = await self._run_turn(
-            session_id, "", internal=True, actor=actor, compact=True,
-        )
+        try:
+            result = await self._run_turn(
+                session_id, "", internal=True, actor=actor, compact=True,
+                compact_instructions=instructions,
+            )
+        except SessionClosedError as e:
+            raise CompactError("unavailable", str(e)) from e
         outcome = result.outcome
         if outcome.ok:
             await self.db.log_session_event(
                 session_id, "compacted", attribution=attribution_for(actor),
             )
-            return
+            return dict(result.compact or {})
         if outcome.status == "interrupted":
             raise CompactError("stopped", "Compact stopped.")
         if outcome.error == _NOTHING_TO_COMPACT:
@@ -4248,9 +4338,11 @@ class AgentEngine:
         origin: str | None = None,
         drop_leading_thinking: bool = False,
         compact: bool = False,
+        compact_instructions: str | None = None,
     ) -> TurnResult:
         """``run()`` plus how the invocation's turn ended. ``compact``: the
-        turn is the compact of :meth:`compact_session`, not a message."""
+        turn is the compact of :meth:`compact_session`, not a message, with
+        ``compact_instructions`` for the summary."""
         # Resolved before the lock: an invalid cause fails here, before the
         # session is marked as running.
         cause_id = resolve_cause(actor, cause)
@@ -4340,6 +4432,7 @@ class AgentEngine:
                 cause_id=cause_id,
                 drop_leading_thinking=drop_leading_thinking,
                 compact=compact,
+                compact_instructions=compact_instructions,
             )
         finally:
             self.sessions.clear_turn_task(session_id, turn_task)
@@ -4362,6 +4455,7 @@ class AgentEngine:
         cause_id: str | None,
         drop_leading_thinking: bool = False,
         compact: bool = False,
+        compact_instructions: str | None = None,
     ) -> TurnResult:
         """The turn of :meth:`run`, with the run lock held: framing
         (buffering, running state, ``session_running``) around
@@ -4394,7 +4488,9 @@ class AgentEngine:
             await self._broadcast_session_running(session_id, True)
             try:
                 if compact:
-                    return await self._compact_inner(session_id, channel)
+                    return await self._compact_inner(
+                        session_id, channel, compact_instructions,
+                    )
                 return await self._run_inner(
                     session_id, user_message, source, channel, model,
                     effort_override=effort_override,
@@ -4436,15 +4532,33 @@ class AgentEngine:
                 # a background task stays "running" in the sidebar.
                 await self._broadcast_session_running(session_id, False)
 
-    async def _compact_inner(self, session_id: str, channel: str | None) -> TurnResult:
+    async def _compact_inner(
+        self, session_id: str, channel: str | None,
+        instructions: str | None = None,
+    ) -> TurnResult:
         """The compact turn of :meth:`compact_session`, framed by
         :meth:`_run_locked`. It ends like a turn of a message (cost, usage,
-        ``done``, idle timer) but stores no message."""
+        ``done``, idle timer) but stores no message. A session without a live
+        client gets one first, which resumes its conversation."""
         client = self.sessions.get_client(session_id)
         if client is None:
-            return TurnResult("", TurnOutcome("failed", "the session has no live client"))
+            session = await self.db.get_session(session_id) or {}
+            try:
+                client = await self._get_or_create_client(
+                    session_id, session.get("source") or "web", None,
+                )
+            except Exception as e:  # noqa: BLE001 (the turn's outcome reports it)
+                logger.warning("Compact: no client for session %s: %s", session_id, e)
+                return TurnResult("", TurnOutcome("failed", f"the session did not start: {e}"))
+            if not self._backend_for_live_session(session_id).capabilities.supports_compact:
+                return TurnResult("", TurnOutcome("failed", "the session's runtime cannot compact"))
+            if self.sessions.pop_stop_request(session_id):
+                return TurnResult("", self._end_turn(
+                    session_id, TurnOutcome("interrupted", "stopped before the compact started"),
+                ))
         st = _TurnState()
         compacted = False
+        report: dict[str, Any] = {}
         try:
             # Autonomous turns that buffered since the last turn go first, as
             # before a message (see _run_inner).
@@ -4452,10 +4566,13 @@ class AgentEngine:
                 session_id, client, "web", channel, first_content_timeout=3.0,
             )
             broadcaster.mark_turn_open(session_id)
-            await client.start_compact()
+            await client.start_compact(instructions)
             async for event in client.receive_turn():
                 if isinstance(event, SystemEvent) and event.subtype == _COMPACT_BOUNDARY:
                     compacted = True
+                    meta = (event.data or {}).get("compact_metadata")
+                    if isinstance(meta, dict):
+                        report = dict(meta)
                 elif isinstance(event, TurnCompleted):
                     self._record_turn_result(event, st)
                     break
@@ -4486,7 +4603,7 @@ class AgentEngine:
         if st.status == "completed" and not compacted:
             st.status, st.error = "failed", _NOTHING_TO_COMPACT
         outcome = await self._finalize_turn(session_id, st, channel, persist_message=False)
-        return TurnResult("", outcome)
+        return TurnResult("", outcome, compact=report if compacted else None)
 
     async def _run_inner(
         self,

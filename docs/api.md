@@ -1279,8 +1279,9 @@ with no tokens and tools that load only on demand are not in the list), and
 auto-compact is off). Otherwise (`live: false`: a Codex session, no live
 runtime, or a runtime that did not answer) the totals come from the last
 turn's usage, as the context bar estimates them, and `categories` is empty.
-`can_compact` is `true` when the session has a live Claude runtime. `404`
-for an unknown session.
+`can_compact` is `true` when the session has a live Claude runtime, or a
+Claude conversation whose runtime is not running (the compact starts it
+first). `404` for an unknown session.
 
 ```json
 Response: {
@@ -1304,13 +1305,51 @@ turn, with no message. Its usage (the `done` event and the session's last
 usage) has `context_tokens`, the context use measured after the compact.
 A compact that compacts records the session event `compacted` with the
 person as actor and cause (see [Session changes](accounts.md#session-changes)).
-Responds with the `GET /api/sessions/{id}/context` shape, measured again.
+A session whose runtime is not running gets it started first: the runtime
+resumes the conversation, then compacts it.
+
+The body is optional: `{"instructions": "keep the PR numbers"}` tells the
+runtime what the summary should keep (`/compact <instructions>`; whitespace
+is folded to one line, at most 2000 characters).
+
+Responds with the `GET /api/sessions/{id}/context` shape, measured again,
+plus `compacted`: the runtime's report of the compact (`pre_tokens`,
+`post_tokens`, `trigger`, …; `{}` when it gave none).
+
+```json
+Response: {
+  "session_id": "a1b2c3d4", "live": true, "can_compact": true,
+  "total_tokens": 17862, "max_tokens": 200000, "auto_compact_threshold": 167000,
+  "categories": [ … ],
+  "compacted": { "trigger": "manual", "pre_tokens": 35177, "post_tokens": 2300 }
+}
+```
 
 Errors are `{"detail": {"code": "…", "message": "…"}}`: `404`
-`session_not_found`; `409` `unavailable` (no live Claude runtime), `busy` (a
+`session_not_found`; `422` `invalid` (instructions too long); `409`
+`unavailable` (not a Claude session, or no conversation yet), `busy` (a
 turn runs or waits), `nothing_to_compact` (the runtime has no messages yet;
 its answer is not shown in the chat) or `stopped`; `502` `failed` (the
 runtime reported an error); `503` `not_accepting_turns` (Nerve shuts down).
+
+### Commands
+
+#### `GET /api/commands?surface=web`
+The chat commands a surface offers (`web`, the default, or `telegram`), in
+menu order. One list in `nerve/commands.py` serves both: Telegram registers
+its `/` menu from it at start, and the web composer shows its command menu
+from it. `args` is `""` (none), `"<x>"` (required) or `"[x]"` (optional).
+`400` for an unknown surface.
+
+```json
+Response: {
+  "surface": "web",
+  "commands": [
+    { "name": "new", "args": "[title]", "help": "Start a new session" },
+    { "name": "compact", "args": "[instructions]", "help": "Summarize the conversation to free context" }
+  ]
+}
+```
 
 ### Modified Files
 

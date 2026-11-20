@@ -1,6 +1,8 @@
+import type { KeyboardEvent } from 'react';
 import { ShieldQuestion, Terminal, FileDiff, Check, Ban } from '../ui/icons';
 import { Button } from '../ui';
 import { useChatStore } from '../../stores/chatStore';
+import { isTypingTarget } from '../../utils/keyboard';
 import { InteractionSource } from './agents/InteractionSource';
 
 /**
@@ -12,6 +14,13 @@ import { InteractionSource } from './agents/InteractionSource';
  * this card renders directly from `pendingInteraction` above the composer.
  * The agent's turn is paused server-side until Approve/Decline is sent
  * (auto-declines after the server-side timeout).
+ *
+ * Keyboard: the card's buttons follow the composer in reverse tab order
+ * (Shift+Tab from the message box reaches Decline, then Approve). With the
+ * focus in the card, `y` or Cmd/Ctrl+Enter approves and `n` declines. A key
+ * typed in the message box never reaches the card, and a held key (a repeat)
+ * does nothing. Escape returns to the message box instead of stopping the
+ * turn, which is waiting for this answer.
  */
 
 const APPROVAL_TYPES = new Set(['command_approval', 'file_approval', 'permission_approval']);
@@ -58,8 +67,35 @@ export function ApprovalCard() {
     : kind === 'file_approval' ? FileDiff
     : ShieldQuestion;
 
+  const approve = () => answerInteraction(null);
+  const decline = () => denyInteraction('Declined by user.');
+
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.nativeEvent.isComposing || isTypingTarget(e.target)) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      document.getElementById('nerve-chat-input')?.focus();
+      return;
+    }
+    if (e.repeat || e.altKey || e.shiftKey) return;
+    const mod = e.metaKey || e.ctrlKey;
+    if ((e.key === 'y' && !mod) || (e.key === 'Enter' && mod)) {
+      e.preventDefault();
+      approve();
+    } else if (e.key === 'n' && !mod) {
+      e.preventDefault();
+      decline();
+    }
+  };
+
   return (
-    <div className="mx-4 mb-2 border border-hue-orange/40 rounded-lg bg-surface shadow-lg overflow-hidden">
+    <div
+      role="group"
+      aria-label={title}
+      onKeyDown={onKeyDown}
+      className="mx-4 mb-2 border border-hue-orange/40 rounded-lg bg-surface shadow-lg overflow-hidden"
+    >
       <div className="px-3 py-2 flex items-center gap-2 bg-hue-orange/10">
         <Icon size={15} className="text-hue-orange" />
         <span className="text-sm font-medium text-text">{title}</span>
@@ -91,13 +127,16 @@ export function ApprovalCard() {
         )}
       </div>
 
-      <div className="px-3 py-2 flex gap-2 border-t border-border">
-        <Button variant="success" size="sm" onClick={() => answerInteraction(null)}>
+      <div className="px-3 py-2 flex items-center gap-2 border-t border-border">
+        <Button variant="success" size="sm" onClick={approve} aria-keyshortcuts="y Meta+Enter Control+Enter">
           <Check size={13} /> Approve
         </Button>
-        <Button variant="danger" size="sm" onClick={() => denyInteraction('Declined by user.')}>
+        <Button variant="danger" size="sm" onClick={decline} aria-keyshortcuts="n">
           <Ban size={13} /> Decline
         </Button>
+        <span aria-hidden="true" className="hidden md:inline ml-auto text-2xs text-text-faint">
+          Focused: y approve · n decline
+        </span>
       </div>
     </div>
   );

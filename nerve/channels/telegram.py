@@ -22,11 +22,11 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, MessageReactionHandler, filters
 
-from nerve.agent.engine import NotAcceptingTurnsError
+from nerve.agent.engine import CompactError, NotAcceptingTurnsError
 from nerve.channels.archives import (
     IMAGE_EXT_TO_MIME,
     MAX_TEXT_SIZE,
@@ -42,8 +42,10 @@ from nerve.channels.base import (
     ObservedMessage,
     OutboundMessage,
 )
+from nerve.channels.context_text import compact_done_text, context_text
 from nerve.channels.observation import ObservationPolicy
 from nerve.channels.router import turn_stop_note
+from nerve.commands import telegram_menu
 from nerve.config import NerveConfig
 
 if TYPE_CHECKING:
@@ -880,6 +882,12 @@ class TelegramChannel(BaseChannel):
         app.add_handler(CommandHandler(
             "reply", self._source_routed_command(self._handle_reply),
         ))
+        app.add_handler(CommandHandler(
+            "compact", self._source_routed_command(self._handle_compact),
+        ))
+        app.add_handler(CommandHandler(
+            "context", self._source_routed_command(self._handle_context),
+        ))
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         app.add_handler(MessageHandler(
             filters.TEXT | filters.PHOTO | filters.COMMAND | filters.Sticker.ALL | filters.Document.ALL,
@@ -921,6 +929,8 @@ class TelegramChannel(BaseChannel):
         )
         self._last_update_time = time.monotonic()
         logger.info("Telegram bot started polling (with TCP keepalive)")
+
+        await self._register_command_menu()
 
         self._announce_auth_state()
 
@@ -2016,6 +2026,75 @@ class TelegramChannel(BaseChannel):
         )
         if first_message:
             await self._deliver_message(update, first_message, session_id=session_id)
+
+    async def _register_command_menu(self) -> None:
+        """Fill Telegram's ``/`` menu from the command list
+        (``nerve/commands.py``). A failure only costs the menu."""
+        if self._app is None:
+            return
+        try:
+            await self._app.bot.set_my_commands(
+                [BotCommand(name, description) for name, description in telegram_menu()],
+            )
+        except Exception as exc:  # noqa: BLE001 (the commands work without it)
+            logger.warning("Could not register the Telegram command menu: %s", exc)
+
+    async def _keep_typing(self, chat_id: int) -> None:
+        """Show the typing indicator until cancelled (it lapses after ~5 s)."""
+        try:
+            while True:
+                try:
+                    await self.send_typing(str(chat_id))
+                except Exception:  # noqa: BLE001 (cosmetic)
+                    pass
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            pass
+
+    async def _handle_compact(self, update: Update, context: Any) -> None:
+        """Handle /compact [instructions] — summarize the session's
+        conversation to free context. A session whose runtime isn't running
+        gets it started first; the answer edits a "Compacting…" note."""
+        self._touch()
+        if not self._is_authorized(update.effective_user.id):
+            return
+        chat_id = update.effective_chat.id
+        session_id = await self.router.get_last_session(f"telegram:{chat_id}")
+        if not session_id:
+            await update.message.reply_text("No active session.")
+            return
+        instructions = " ".join(context.args) if context.args else None
+        note = await update.message.reply_text("Compacting…")
+        typing = asyncio.create_task(self._keep_typing(chat_id))
+        try:
+            report = await self.router.compact_session(session_id, instructions)
+        except (CompactError, NotAcceptingTurnsError) as e:
+            text = str(e)
+        except Exception as e:  # noqa: BLE001 (answer instead of going silent)
+            logger.warning("Telegram /compact failed for %s: %s", session_id, e)
+            text = f"Compact failed: {e}"
+        else:
+            text = compact_done_text(report, await self.router.session_context(session_id))
+        finally:
+            typing.cancel()
+        try:
+            await note.edit_text(text)
+        except Exception:  # noqa: BLE001 (the note may be gone)
+            await update.message.reply_text(text)
+
+    async def _handle_context(self, update: Update, context: Any) -> None:
+        """Handle /context — what fills the session's context window."""
+        self._touch()
+        if not self._is_authorized(update.effective_user.id):
+            return
+        session_id = await self.router.get_last_session(
+            f"telegram:{update.effective_chat.id}",
+        )
+        view = await self.router.session_context(session_id) if session_id else None
+        if view is None:
+            await update.message.reply_text("No active session.")
+            return
+        await update.message.reply_text(context_text(view))
 
     async def _handle_stop(self, update: Update, context: Any) -> None:
         """Handle /stop — stop the currently running session."""

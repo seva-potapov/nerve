@@ -197,10 +197,11 @@ class AgentClient(Protocol):
         of ``total_tokens``). The default: unsupported."""
         raise BackendError("context_usage unsupported")
 
-    async def start_compact(self) -> None:
+    async def start_compact(self, instructions: str | None = None) -> None:
         """Send the runtime's compact command as a turn: the runtime replaces
-        the conversation so far with a summary. Read the turn with
-        :meth:`receive_turn`. The default: unsupported."""
+        the conversation so far with a summary, following ``instructions``
+        when given. Read the turn with :meth:`receive_turn`. The default:
+        unsupported."""
         raise BackendError("compact unsupported")
 
     async def mcp_app_for_tool(self, tool_name: str) -> "dict[str, str] | None":

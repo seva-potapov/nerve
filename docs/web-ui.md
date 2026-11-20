@@ -99,6 +99,32 @@ On a phone (narrower than 768 px), a bar at the bottom replaces the nav rail: **
 - **Context popover**: a click on the bar opens it (Escape or a click outside closes it). For a Claude session with a live runtime it shows a bar with one segment per category (system prompt, system tools, MCP tools, skills, messages, and so on), the tokens of each category and the auto-compact threshold. For a Codex session, or a Claude session with no live runtime, it shows the totals only. Below that are the last turn's tokens and the session cost.
 - **Compact**: in a live Claude session, **Compact…** asks first ("Summarizes earlier messages to free context. The full transcript stays in Nerve.") and then runs the compact as a turn. Compact is available when the agent is idle; while a turn runs, the button is disabled. The popover then shows the new categories and the tokens it freed. When the runtime has nothing to compact, the popover says so; nothing goes into the chat. See [`POST /api/sessions/{id}/compact`](api.md#post-apisessionsidcompact).
 
+### Slash commands
+The composer takes the same commands as the Telegram bot, so the chat can be driven from the keyboard alone.
+
+- **Menu**: `/` at the very start of the message box opens a list of the commands above it, filtered by what follows (`/co` shows `/compact` and `/context`). `↑ ↓` select, `Tab` completes (`/compact `), `Enter` runs the selected command, or completes it when it needs an argument, and `Esc` closes the list and keeps the text. While the list is closed, `↑ ↓` recall earlier prompts and `↓` in an empty box opens the agents panel as before. While you type a command's argument, its usage shows above the box.
+- **What is a command**: a message is a command only when its first word is exactly a command's name (`/compact`, `/compact keep the PR numbers`). Anything else goes to the model unchanged: a path (`/root/nerve-workspace/x is broken`), an unknown word (`/compactfoo`), another letter case (`/Compact`), a command that takes no argument followed by more text (`/plans for tomorrow: …`), and a message with quotes or attachments. To send a message that starts with a command's name, start it with `//`: one slash is removed, so `//compact` sends `/compact`.
+- **Feedback**: what a command did shows in one line above the message box (read out by screen readers), for example "Compacted: 14.5k → 2.8k tokens" or the server's message when it refuses. It never goes into the chat or to the model. A success goes after a few seconds; an error stays until you type.
+- **The commands**: the list comes from [`GET /api/commands?surface=web`](api.md); when it does not load, the composer uses its own copy.
+
+| Command | What it does |
+|---|---|
+| `/compact [instructions]` | Compacts the conversation (as **Compact** in the context popover, without the confirmation). The instructions tell the summary what to keep. The context bar takes the new figures. |
+| `/context` | Opens the context popover with the focus in it; `Esc` goes back to the message box. |
+| `/new [title]` | A new chat (as `Cmd/Ctrl + Shift + O`); with a title, the chat is created with that name. |
+| `/stop` | Stops the turn (as `Esc`). |
+| `/star`, `/unstar` | Stars or unstars this chat. |
+| `/fork` | Forks this chat (as `Cmd/Ctrl + Shift + F`). |
+| `/sessions` | Shows the session list with the focus in its search (as `Cmd/Ctrl + K`). |
+| `/plans`, `/doctor` | Opens the plans page, or the diagnostics. |
+| `/model <name>` | Switches this chat's model (as the model menu): an id, a menu name (`Opus 4.5`, `opus-4.5`) or the unique start of one (`haiku`). A name that fits more than one model lists them. |
+| `/help` | Opens the keyboard shortcuts (`Cmd/Ctrl + /`), which list the commands too. |
+
+### Keyboard-only use
+- **Session search** (`Cmd/Ctrl + K`): `↓` goes from the field to the first result, `↑ ↓` move between results (`↑` on the first goes back to the field), and `Enter` opens one; `Enter` in the field opens the first result.
+- **Approval card** (a command, file or permission approval): `Shift + Tab` from the message box reaches its buttons. With the focus in the card, `y` or `Cmd/Ctrl + Enter` approves and `n` declines; a held key counts once, a key typed in the message box never reaches the card, and `Esc` goes back to the message box without stopping the turn.
+- **Question card** (Codex input request): `Cmd/Ctrl + Enter` answers from anywhere in the card, `Enter` in its text field too, and `Esc` goes back to the message box. The questions, forms and plan cards in the transcript take the keyboard as their own: option buttons, `Enter` in an answer field, `Cmd/Ctrl + Enter` to submit a form, and `Esc` kept in the card while the turn waits for it.
+
 ### Tool Call Rendering
 In the chat, each run of tool calls and thinking between two text blocks of a message is one **tool burst**. A finished burst with a tool call and at least two blocks shows as one muted line that names the work, for example "Read 3 files, ran 4 commands, searched 2 times, edited 2 files" (reads and edits count distinct files; MCP tools count per server, "used 2 nerve tools"), with "1 failed" in red when calls failed. A click opens the rows. While a turn runs, its last burst stays open, so the newest calls show; it folds when text follows or the turn ends. Question cards (`ask_user`, AskUserQuestion, `ask_form`), the ExitPlanMode decision card, files that the agent sends (`send_file`) and the first card of a workflow run are never in a burst. Agent tabs and plan tabs show the rows without bursts.
 

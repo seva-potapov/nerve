@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionContext } from '../../api/client';
@@ -12,6 +12,7 @@ vi.mock('../../api/client', async (orig) => ({
 
 const { api } = await import('../../api/client');
 const { ContextBar } = await import('./ContextBar');
+const { useUIStore } = await import('../../stores/uiStore');
 
 const getContext = vi.mocked(api.getSessionContext);
 const compactSession = vi.mocked(api.compactSession);
@@ -148,5 +149,38 @@ describe('ContextBar', () => {
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(trigger()).toHaveFocus();
+  });
+});
+
+describe('ContextBar and the composer commands', () => {
+  it('opens on /context with the focus in the popover, and Escape goes back to the composer', async () => {
+    getContext.mockResolvedValue(LIVE);
+    render(
+      <>
+        <ContextBar usage={USAGE} sessionId="s-1" backend="claude" busy={false} />
+        <textarea id="nerve-chat-input" aria-label="composer" />
+      </>,
+    );
+    const user = userEvent.setup();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    act(() => { useUIStore.getState().requestContextPopover(); });
+    await waitFor(() => expect(popover()).toHaveFocus());
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByLabelText('composer')).toHaveFocus();
+  });
+
+  it('does not open for a request made before it was mounted', () => {
+    act(() => { useUIStore.getState().requestContextPopover(); });
+    renderBar();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('takes the context that a /compact of its session measured', () => {
+    renderBar();
+    act(() => { useUIStore.getState().publishContext('other', { ...LIVE, total_tokens: 5000 }); });
+    expect(trigger()).toHaveAccessibleName('Context window: about 33.0k of 200.0k tokens');
+    act(() => { useUIStore.getState().publishContext('s-1', { ...LIVE, total_tokens: 2800 }); });
+    expect(trigger()).toHaveAccessibleName('Context window: 2.8k of 200.0k tokens');
   });
 });

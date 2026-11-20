@@ -1156,6 +1156,12 @@ export interface SessionContext {
   categories: { name: string; tokens: number }[];
 }
 
+/** `POST /api/sessions/{id}/compact`: the context after the compact, and its figures. */
+export interface CompactResult extends SessionContext {
+  /** The runtime's report; `{}` or null when it gave no figures. */
+  compacted?: { pre_tokens?: number; post_tokens?: number; [key: string]: unknown } | null;
+}
+
 /**
  * `GET /health` — not under `/api`, unauthenticated, and deliberately a raw
  * `fetch`: during a restart it answers with connection errors and 5xx, and
@@ -1531,9 +1537,21 @@ export const api = {
     request<{ events: any[] }>(`/sessions/${id}/events?limit=${limit}`),
   getSessionContext: (id: string) =>
     request<SessionContext>(`/sessions/${encodeURIComponent(id)}/context`),
-  /** Runs as a turn; answers with the context measured after it. */
-  compactSession: (id: string) =>
-    request<SessionContext>(`/sessions/${encodeURIComponent(id)}/compact`, { method: 'POST' }),
+  /**
+   * Runs as a turn; answers with the context measured after it, and what the
+   * compact reported (`compacted`, null when the runtime gave no figures).
+   * `instructions` tell the summary what to keep (`/compact <instructions>`).
+   */
+  compactSession: (id: string, instructions?: string) =>
+    request<CompactResult>(`/sessions/${encodeURIComponent(id)}/compact`, {
+      method: 'POST',
+      ...(instructions?.trim() ? { body: JSON.stringify({ instructions: instructions.trim() }) } : {}),
+    }),
+  /** The composer's slash commands (`GET /api/commands?surface=web`). */
+  getCommands: () =>
+    request<{ commands: Array<{ name: string; args: string; help: string; choices?: string[] }> }>(
+      '/commands?surface=web',
+    ),
 
   // Agents — the subagent / background-task records of one session, their
   // transcripts and output, scoped stops, and the server-visible turn queue.

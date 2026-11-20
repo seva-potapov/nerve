@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Plus, X, MessageSquare, ChevronRight, ChevronDown, Bot, Loader2, Search, MoreHorizontal, Star, StarFilled, Pencil, Trash2, Archive, ArchiveRestore, Repeat, Unlink, GitBranch, Sparkles } from '../ui/icons';
 import { Button, IconButton, TextField } from '../ui';
@@ -16,6 +16,8 @@ import { safeAreaInsets } from '../../utils/safeArea';
 import { forkChat } from '../../utils/forkChat';
 import { ATTENTION_TONE, blockedOnYou, needsYou } from '../../utils/sessionAttention';
 import { AttentionReason, SessionListSummary, WaitingMark } from './SessionAttention';
+
+const SEARCH_RESULTS_ID = 'nerve-sidebar-search-results';
 
 /** Strip leading '#' and 'Implement: ' prefixes from generated titles. */
 function cleanTitle(session: Session): string {
@@ -269,6 +271,36 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, []);
+
+  // The keyboard in the search results: ↓ from the field goes to the first
+  // result, ↑/↓ move between results, ↑ on the first goes back to the field,
+  // and Enter in the field opens the first result. Enter on a result opens
+  // it (it is a link).
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const resultLinks = () => Array.from(resultsRef.current?.querySelectorAll<HTMLAnchorElement>(':scope > a') ?? []);
+  const onSearchKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.nativeEvent.isComposing || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+    const first = resultLinks()[0];
+    if (!first) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      first.focus();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      first.click();
+    }
+  };
+  const onResultsKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    if (e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+    const links = resultLinks();
+    const at = links.indexOf(document.activeElement as HTMLAnchorElement);
+    if (at < 0) return;
+    e.preventDefault();
+    if (e.key === 'ArrowDown') links[Math.min(at + 1, links.length - 1)].focus();
+    else if (at === 0) inputRef.current?.focus();
+    else links[at - 1].focus();
+  };
 
   // Escape key clears search
   useEffect(() => {
@@ -562,6 +594,8 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
                 ref={inputRef}
                 value={localQuery}
                 onChange={e => handleSearchChange(e.target.value)}
+                onKeyDown={onSearchKeyDown}
+                aria-controls={isSearching ? SEARCH_RESULTS_ID : undefined}
                 onFocus={() => setSearchFocused(true)}
                 onBlur={() => setSearchFocused(false)}
                 onMouseEnter={() => setSearchHovered(true)}
@@ -594,7 +628,7 @@ export function SessionSidebar({ sessions, activeSession, agentStatus, onCreate,
       <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
         {/* Search results mode */}
         {isSearching ? (
-          <div>
+          <div id={SEARCH_RESULTS_ID} ref={resultsRef} onKeyDown={onResultsKeyDown}>
             {searchLoading && !searchResults && (
               <div className="flex items-center gap-2 px-3 py-3 text-xs text-text-faint">
                 <Loader2 size={11} className="animate-spin" />

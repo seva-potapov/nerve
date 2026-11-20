@@ -1354,6 +1354,27 @@ carry text. A `.png` or `.ico` has to be committed by a human.
 | `telegram.stream_mode` | string | `partial` | `partial` (edit msgs) or `full` |
 | `telegram.reply_routes_to_origin_session` | bool | `true` | A reply routes to the session that produced the replied-to message (and makes it active); a reply that cannot be tied to a live session is refused with a hint. `/new <message>` is the escape hatch: it starts a fresh session with that message, reply or not. `false` restores the old behaviour: a reply is context-only and lands in the active session. The message→session map is stored in the database (`channel_reply_routes`, kept 90 days) whether the flag is on or off, so it survives a restart and turning the flag back on covers earlier messages. Either way, a reply to a pending `ask_user` card answers the question, like `/reply` |
 
+### Commands
+
+The bot's commands come from one list, `nerve/commands.py`, which the web
+composer's command menu also uses (`GET /api/commands`). At start the bot
+registers them as its `/` menu (`setMyCommands`); a failure is logged and
+costs only the menu.
+
+| Command | What it does |
+|---|---|
+| `/new [title]` | Start a new session |
+| `/stop` | Stop the running turn; background agents keep running |
+| `/compact [instructions]` | Summarize the conversation to free context, keeping what the instructions ask for. A session whose runtime is not running gets it started first. The bot answers "Compacting…" and edits it to the result, e.g. "Compacted: 14.5K → 2.8K tokens (of 1M)." |
+| `/context` | What fills the context window: total, auto-compact threshold, biggest categories |
+| `/sessions`, `/session [id]` | Switch sessions |
+| `/star`, `/unstar` | Keep the session from closing when idle, or not |
+| `/plans` | Review pending plans |
+| `/reply <answer>` | Answer the latest pending question |
+| `/doctor` | Run the health checks |
+| `/restart` | Restart Nerve (every session) |
+| `/start`, `/pair <code>` | Check the connection; pair an account |
+
 ### Notification sink
 
 The `notify` tool and async questions/approvals go to the owner's DM by default,

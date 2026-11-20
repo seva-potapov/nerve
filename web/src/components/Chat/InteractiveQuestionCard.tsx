@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { ExternalLink, MessageCircleQuestion, Send, X } from '../ui/icons';
 import { Button, TextField } from '../ui';
 import { useChatStore } from '../../stores/chatStore';
 import { InteractionSource } from './agents/InteractionSource';
+import { isTypingTarget } from '../../utils/keyboard';
 
 interface QuestionOption {
   label: string;
@@ -88,8 +89,29 @@ export function InteractiveQuestionCard() {
   const url = typeof input.url === 'string' ? input.url : '';
   const message = typeof input.message === 'string' ? input.message : '';
 
+  // Cmd/Ctrl+Enter answers from anywhere in the card. Escape returns to the
+  // message box rather than stopping the turn, which waits for this answer.
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      document.getElementById('nerve-chat-input')?.focus();
+    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.repeat
+        // A text field answers its own Enter.
+        && !isTypingTarget(event.target)) {
+      event.preventDefault();
+      if (complete) submit();
+    }
+  };
+
   return (
-    <div className="mx-4 mb-2 border border-accent/30 rounded-lg bg-surface shadow-lg overflow-hidden">
+    <div
+      role="group"
+      aria-label={message || 'Codex needs your input'}
+      onKeyDown={onKeyDown}
+      className="mx-4 mb-2 border border-accent/30 rounded-lg bg-surface shadow-lg overflow-hidden"
+    >
       <div className="px-3 py-2 flex items-center gap-2 bg-accent/10">
         <MessageCircleQuestion size={15} className="text-accent" />
         <span className="text-sm font-medium text-text">
@@ -167,7 +189,7 @@ export function InteractiveQuestionCard() {
         <Button variant="subtle" size="sm" onClick={() => deny('Declined by user.')}>
           <X size={12} /> Decline
         </Button>
-        <Button variant="primary" size="sm" onClick={submit} disabled={!complete} className="rounded">
+        <Button variant="primary" size="sm" onClick={submit} disabled={!complete} className="rounded" aria-keyshortcuts="Meta+Enter Control+Enter">
           <Send size={12} /> Continue
         </Button>
       </div>

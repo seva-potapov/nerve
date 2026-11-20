@@ -649,6 +649,21 @@ class ChannelRouter:
         turn was left running (see :func:`turn_stop_note`)."""
         return await self.engine.stop_turn(session_id, attribution=UNATTRIBUTED)
 
+    async def compact_session(
+        self, session_id: str, instructions: str | None = None,
+    ) -> dict[str, Any]:
+        """Compact the session's conversation (``/compact``); a session
+        without a live runtime gets one first. Returns the runtime's report
+        (``pre_tokens``, ``post_tokens``). Raises ``CompactError``."""
+        return await self.engine.compact_session(
+            session_id, actor=None, instructions=instructions,
+        )
+
+    async def session_context(self, session_id: str) -> dict[str, Any] | None:
+        """What fills the session's context window (``/context``), the
+        shape of ``GET /api/sessions/{id}/context``; None: no such session."""
+        return await self.engine.context_view(session_id)
+
     async def set_session_starred(self, session_id: str, starred: bool) -> bool:
         """Star/unstar a session. Starred sessions are never auto-archived."""
         return await self.engine.sessions.set_starred(

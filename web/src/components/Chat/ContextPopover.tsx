@@ -75,7 +75,9 @@ export function ContextPopover({
       id={id}
       role="dialog"
       aria-label="Context window"
-      className="absolute right-0 top-full mt-2 z-50 w-[min(20rem,calc(100vw-1.5rem))] max-h-[calc(100dvh-7rem)] overflow-y-auto bg-surface-raised border border-border-subtle rounded-lg shadow-xl p-3 text-xs"
+      // Focusable, so that the composer's `/context` can put the keyboard here.
+      tabIndex={-1}
+      className="outline-none absolute right-0 top-full mt-2 z-50 w-[min(20rem,calc(100vw-1.5rem))] max-h-[calc(100dvh-7rem)] overflow-y-auto bg-surface-raised border border-border-subtle rounded-lg shadow-xl p-3 text-xs"
     >
       <SectionTitle>Context window</SectionTitle>
       <div className="flex items-baseline justify-between gap-2">

@@ -397,6 +397,8 @@ interface ChatState {
   /** Retitle a session from what it did (the server's title model). */
   regenerateSessionTitle: (id: string) => Promise<void>;
   toggleStar: (id: string) => Promise<void>;
+  /** Star or unstar a session (the composer's `/star`, `/unstar`). Throws when the server refuses. */
+  setSessionStarred: (id: string, starred: boolean) => Promise<void>;
   /** Re-parent a session (drag onto another) or clear it (null → top-level). */
   setSessionParent: (childId: string, parentId: string | null) => Promise<void>;
   searchSessions: (query: string) => Promise<void>;
@@ -1278,6 +1280,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch (e) {
       console.error('Failed to toggle star:', e);
     }
+  },
+
+  setSessionStarred: async (id: string, starred: boolean) => {
+    await api.updateSession(id, { starred });
+    set(state => patchSessionRow(state, id, { starred }));
   },
 
   setSessionParent: async (childId: string, parentId: string | null) => {

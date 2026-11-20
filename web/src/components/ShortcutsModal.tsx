@@ -1,4 +1,7 @@
+import { useEffect } from 'react';
+import { useCommandStore } from '../stores/commandStore';
 import { useUIStore } from '../stores/uiStore';
+import { commandUsage } from '../utils/slashCommands';
 import { FOCUS_COMPOSER_COMBO, formatCombo, type ShortcutCombo } from '../utils/keyboard';
 import { Modal } from './ui/Modal';
 
@@ -62,6 +65,9 @@ const SECTIONS: Section[] = [
     items: [
       { combo: { key: 'Enter' }, description: 'Send message' },
       { combo: { shift: true, key: 'Enter' }, description: 'New line' },
+      { combo: { key: '/' }, description: 'Command menu (at the start of the message)' },
+      { combo: { key: 'Tab' }, description: 'Complete the selected command' },
+      { combo: { key: '/' }, label: '//', description: 'Send a message that starts with a slash' },
     ],
   },
   {
@@ -80,6 +86,8 @@ const SECTIONS: Section[] = [
 export function ShortcutsModal() {
   const open = useUIStore((s) => s.shortcutsModalOpen);
   const close = useUIStore((s) => s.closeShortcutsModal);
+  const commands = useCommandStore((s) => s.commands);
+  useEffect(() => { if (open) void useCommandStore.getState().load(); }, [open]);
 
   // The capture-phase Escape handling this component used to own is now
   // the Modal's job, along with the focus trap it never had.
@@ -104,6 +112,23 @@ export function ShortcutsModal() {
             </div>
           </div>
         ))}
+        {/* Typed in the message box, the same commands as the Telegram bot.
+            Their feedback shows above the box and never reaches the model. */}
+        <div>
+          <h3 className="text-xs uppercase tracking-wider text-text-faint font-medium mb-2">
+            Commands
+          </h3>
+          <div className="space-y-1.5">
+            {commands.map((c) => (
+              <div key={c.name} className="flex items-center justify-between gap-4 py-1">
+                <span className="text-sm text-text-secondary">{c.help}</span>
+                <code className="px-2 py-1 text-xs leading-none font-mono text-text-secondary bg-surface border border-border-subtle rounded shrink-0">
+                  {commandUsage(c)}
+                </code>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     </Modal>
   );
