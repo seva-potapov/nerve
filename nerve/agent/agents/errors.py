@@ -80,3 +80,34 @@ class NotOwner(AgentControlError):
 
     status = 403
     code = "not_owner"
+
+
+class ProcessNotFound(AgentControlError):
+    """No such process among the session's processes (it ended, or it was
+    never the session's)."""
+
+    status = 404
+    code = "process_not_found"
+
+
+class ProcessChanged(AgentControlError):
+    """The pid now names another process (its start time changed): the
+    caller's view is stale."""
+
+    status = 409
+    code = "process_changed"
+
+
+class NotSignalable(AgentControlError):
+    """The process is the session's CLI, one of its own helpers, or Nerve:
+    stopping it is the session stop's job."""
+
+    status = 403
+    code = "not_signalable"
+
+
+class ProcessesUnsupported(AgentControlError):
+    """This platform has no ``/proc``: processes cannot be listed."""
+
+    status = 501
+    code = "processes_unsupported"

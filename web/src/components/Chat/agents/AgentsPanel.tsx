@@ -10,6 +10,7 @@ import { CheckCheck, ChevronDown, ChevronRight, ListTree, X } from '../../ui/ico
 import { formatCost } from './agentVisuals';
 import { focusComposer } from './agentActions';
 import { AgentRow } from './AgentRow';
+import { ProcessesSection } from './ProcessesSection';
 
 /** Done rows shown before "Show all N". */
 const DONE_PREVIEW = 10;
@@ -35,6 +36,7 @@ export function AgentsPanel() {
   const summary = useAgentStore(s => s.summary);
   const quietAfter = useAgentStore(s => s.capabilities.quiet_after_minutes);
   const focusNonce = useAgentStore(s => s.focusNonce);
+  const sessionId = useAgentStore(s => s.sessionId);
   const self = useAuthStore(s => s.viewer?.id ?? null);
   const anyLive = useMemo(() => Object.values(agents).some(a => !a.ambient && isLive(a)), [agents]);
   const now = useNow(1000, anyLive);
@@ -228,7 +230,7 @@ export function AgentsPanel() {
 
       <div className="flex-1 overflow-y-auto @container">
         {empty ? (
-          <div className="h-full flex flex-col items-center justify-center gap-1.5 px-6 text-center">
+          <div className="py-12 flex flex-col items-center justify-center gap-1.5 px-6 text-center">
             <ListTree size={20} className="text-text-faint" aria-hidden="true" />
             <p className="text-sm text-text-muted">No agents in this session yet.</p>
             <p className="text-xs text-text-faint">Agents the orchestrator launches show up here, with their progress.</p>
@@ -292,6 +294,7 @@ export function AgentsPanel() {
             )}
           </ul>
         )}
+        <ProcessesSection sessionId={sessionId} />
       </div>
       <div aria-live="polite" className="sr-only">{announcement}</div>
     </section>

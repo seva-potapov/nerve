@@ -216,6 +216,12 @@ class AgentClient(Protocol):
 
     def is_alive(self) -> bool: ...
 
+    def process_pid(self) -> int | None:
+        """The pid of the runtime's subprocess while it runs (the root of
+        the session's process tree, see nerve.agent.processes), or ``None``
+        when there is none or it is not known."""
+        return None
+
     # -- autonomous/idle stream (only when supports_idle_stream) ------- #
 
     def try_receive_idle_events(self) -> "list[AgentEvent] | None":

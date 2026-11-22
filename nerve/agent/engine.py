@@ -33,6 +33,10 @@ from nerve.agent.agents.errors import (
     AlreadyStarted,
     NoRuntime,
     NotOwner,
+    NotSignalable,
+    ProcessChanged,
+    ProcessesUnsupported,
+    ProcessNotFound,
     QueueEntryNotFound,
     Unsupported,
 )
@@ -58,6 +62,7 @@ from nerve.agent.backends import (
     TurnRefusedError,
     build_backends,
 )
+from nerve.agent import processes as procs
 from nerve.agent.backends.events import TurnStatus
 from nerve.agent.cache_policy import resolve_cache_ttl
 from nerve.agent.interactive import (
@@ -2711,6 +2716,163 @@ class AgentEngine:
         """How many of the session's agents are live (housekeeping tasks
         excluded) — the sidebar's background count."""
         return self.agents.live_count(session_id)
+
+    # -- OS processes (nerve.agent.processes) --------------------------- #
+
+    _process_scanner: procs.ProcessScanner | None = None
+    _process_kill_tasks: set | None = None
+    PROCESS_KILL_AFTER = 5.0
+
+    def _processes(self) -> procs.ProcessScanner:
+        if self._process_scanner is None:
+            self._process_scanner = procs.ProcessScanner()
+        return self._process_scanner
+
+    def session_process_root(self, session_id: str) -> int | None:
+        """The pid of the session's live runtime subprocess, if any."""
+        client = self.sessions.get_client(session_id)
+        fn = getattr(client, "process_pid", None) if client is not None else None
+        try:
+            pid = fn() if callable(fn) else None
+        except Exception:  # noqa: BLE001 (a listing never fails on one client)
+            return None
+        return pid if isinstance(pid, int) and pid > 0 else None
+
+    def _process_roots(self) -> dict[str, int]:
+        roots: dict[str, int] = {}
+        for sid, _client in self.sessions.client_items():
+            pid = self.session_process_root(sid)
+            if pid is not None:
+                roots[sid] = pid
+        return roots
+
+    async def session_processes(self, session_id: str, *, fresh: bool = False) -> dict:
+        """The OS processes the session started (``{"supported": False}``
+        without ``/proc``). Works without a live runtime: then only the
+        processes tagged for the session are found, as ``orphan``."""
+        scanner = self._processes()
+        roots = self._process_roots()
+        background = self.agents.shell_task_ids(session_id)
+        redact = procs.Redactor(procs.known_secrets(self.config))
+        view = await asyncio.to_thread(
+            scanner.session_processes, session_id, roots,
+            background_tasks=background, redact=redact,
+            max_age=0.0 if fresh else procs.CACHE_SECONDS,
+        )
+        view["session_id"] = session_id
+        return view
+
+    async def signal_session_process(
+        self, session_id: str, pid: int, *, signal_name: str = "TERM",
+        start_ticks: int | None = None, tree: bool = False,
+        attribution: Attribution = UNATTRIBUTED,
+    ) -> dict:
+        """Signal one of the session's processes (``TERM`` or ``KILL``).
+
+        Re-scans first and refuses a pid that is not the session's
+        (:class:`ProcessNotFound`), whose start time is not ``start_ticks``
+        (:class:`ProcessChanged`: the pid was reused), or that is the CLI,
+        one of its helpers or Nerve (:class:`NotSignalable`). A live
+        background shell or monitor is stopped through its agent stop. With
+        ``tree`` the session's descendants of the process are signalled
+        too, leaves first. A ``TERM`` is followed by ``KILL`` after
+        :attr:`PROCESS_KILL_AFTER` seconds for whatever still runs.
+        """
+        import signal as _signal
+
+        sig = {"TERM": _signal.SIGTERM, "KILL": _signal.SIGKILL}.get(str(signal_name).upper())
+        if sig is None:
+            raise NotSignalable("signal must be TERM or KILL")
+        view = await self.session_processes(session_id, fresh=True)
+        if not view.get("supported"):
+            raise ProcessesUnsupported("Processes cannot be listed on this platform")
+        rows = {r["pid"]: r for r in view["processes"]}
+        row = rows.get(pid)
+        if row is None:
+            raise ProcessNotFound(f"Process {pid} is not running in this session")
+        if start_ticks is not None and row["start_ticks"] != start_ticks:
+            raise ProcessChanged(f"Process {pid} is not the one listed any more")
+        if pid in (0, 1, os.getpid()) or row["role"] not in procs.SIGNALABLE_ROLES:
+            raise NotSignalable(
+                f"Process {pid} is the session's runtime or one of its helpers; "
+                "stop the session instead",
+            )
+        details: dict[str, Any] = {
+            "pid": pid, "role": row["role"], "signal": str(signal_name).upper(),
+            "tree": bool(tree), "command": row["command"], "task_id": row.get("task_id"),
+        }
+        agent_id = row.get("agent_id")
+        if row["role"] == "background" and agent_id:
+            rec = self.agents.get(session_id, agent_id)
+            if rec is not None and not rec.terminal:
+                try:
+                    _view, stopping = await self.stop_agent(
+                        session_id, agent_id, attribution=attribution, cascade=False,
+                    )
+                except (NoRuntime, Unsupported):
+                    pass  # no runtime to ask: signal the process directly
+                else:
+                    details.update(via="agent", agent_id=agent_id, stopping=stopping)
+                    await self._log_stop_event(session_id, "process_signal", details, attribution)
+                    return {"pid": pid, "via": "agent", "agent_id": agent_id, "signalled": []}
+
+        targets: list[int] = []
+        if tree:
+            kids: dict[int, list[int]] = {}
+            for r in view["processes"]:
+                kids.setdefault(r["ppid"], []).append(r["pid"])
+
+            def visit(p: int) -> None:
+                for c in kids.get(p, ()):
+                    if c in rows and c != p:
+                        visit(c)
+                        targets.append(c)
+
+            visit(pid)
+        targets.append(pid)
+        targets = [t for t in targets if t not in (0, 1, os.getpid())
+                   and rows[t]["role"] in procs.SIGNALABLE_ROLES]
+        wanted = {t: rows[t]["start_ticks"] for t in targets}
+        signalled = self._send_signals(wanted, sig)
+        details.update(via="signal", signalled=signalled)
+        await self._log_stop_event(session_id, "process_signal", details, attribution)
+        if sig == _signal.SIGTERM and signalled and self.PROCESS_KILL_AFTER > 0:
+            if self._process_kill_tasks is None:
+                self._process_kill_tasks = set()
+            task = asyncio.create_task(self._kill_survivors(
+                {t: wanted[t] for t in signalled}, self.PROCESS_KILL_AFTER,
+            ))
+            self._process_kill_tasks.add(task)
+            task.add_done_callback(self._process_kill_tasks.discard)
+        return {"pid": pid, "via": "signal", "signalled": signalled}
+
+    def _send_signals(self, wanted: dict[int, int], sig: int) -> list[int]:
+        """Signal each pid whose start time still matches; the ones sent."""
+        scanner = self._processes()
+        sent: list[int] = []
+        for target, ticks in wanted.items():
+            if scanner.start_ticks(target) != ticks:
+                continue  # ended, or the pid was reused
+            try:
+                os.kill(target, sig)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                logger.warning("no permission to signal pid %s", target)
+                continue
+            sent.append(target)
+        return sent
+
+    async def _kill_survivors(self, wanted: dict[int, int], delay: float) -> None:
+        import signal as _signal
+
+        await asyncio.sleep(delay)
+        survivors = {p: t for p, t in wanted.items()
+                     if self._processes().start_ticks(p) == t}
+        if survivors:
+            killed = self._send_signals(survivors, _signal.SIGKILL)
+            if killed:
+                logger.info("SIGKILL after TERM timeout: %s", killed)
 
     async def agent_snapshot(self, session_id: str, *, limit: int = 200) -> dict:
         """The session's ``AgentSnapshot`` (roster, summary, capabilities,

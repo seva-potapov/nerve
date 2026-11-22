@@ -77,7 +77,14 @@ session totals still come from the runtime and are not changed by it.
   to open the Agents panel.
 - **Agents panel.** A tab in the side panel, grouped Needs attention →
   Running (nested children under their parent) → Done → Ended, with
-  `[Stop all…]` in the header.
+  `[Stop all…]` in the header. Below the agents, **Processes** lists the
+  OS processes the session started (Linux servers only), refreshed every
+  3 s while the panel is open: Current call, Background (the shell's
+  agent), Left running (still alive after its call or after the runtime
+  ended) and CLI internals (folded). Each row shows the redacted command,
+  PID, age, CPU and memory; calls, background shells and leftovers have a
+  two-step stop (TERM to the process and its children, KILL after 5 s).
+  See `GET /api/sessions/{id}/processes` in [api.md](api.md).
 - **Agent tabs.** One per opened agent: the live transcript, or a shell's
   output, or a workflow's tree. They never close on their own.
 - **Split Stop.** The red button stops the turn. Its caret offers "Stop turn

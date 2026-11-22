@@ -94,3 +94,46 @@ export type AgentWSMessage =
   | { type: 'agent_event'; session_id: string; agent_id: string; item: AgentEventItem }
   | { type: 'queue_update'; session_id: string; queue: QueueEntryView[]; removed?: QueueRemoval[] }
   | { type: 'session_agents'; session_id: string; background_count: number; has_background_tasks: boolean };
+
+// ------------------------------------------------------------------ //
+//  OS processes of a session (GET /api/sessions/{id}/processes)       //
+// ------------------------------------------------------------------ //
+
+/** `cli`: the session's runtime. `call`: a Bash call. `background`: a
+ * background shell or monitor (`agent_id`). `internal`: the CLI's own
+ * helpers (MCP servers, hooks). `orphan`: left running outside the tree. */
+export type ProcessRole = 'cli' | 'call' | 'background' | 'internal' | 'orphan';
+
+export interface SessionProcess {
+  pid: number;
+  ppid: number;
+  role: ProcessRole;
+  task_id: string | null;
+  agent_id: string | null;
+  name: string;
+  state: string;
+  start_ticks: number;
+  started_at: string | null;
+  cpu_seconds: number;
+  cpu_percent: number | null;
+  rss_bytes: number;
+  threads: number;
+  cwd: string | null;
+  /** Redacted, at most 2 KiB. */
+  command: string;
+}
+
+export interface SessionProcesses {
+  session_id: string;
+  supported: boolean;
+  root_pid?: number | null;
+  scanned_at?: string;
+  processes: SessionProcess[];
+}
+
+export interface SignalProcessResult {
+  pid: number;
+  via: 'signal' | 'agent';
+  agent_id?: string;
+  signalled: number[];
+}

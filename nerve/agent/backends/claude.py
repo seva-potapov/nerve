@@ -64,6 +64,7 @@ from nerve.agent.backends.base import (
     config_excluded_tools,
 )
 from nerve.agent.backends.images import validate_image_data, validate_image_file
+from nerve.agent import processes
 from nerve.agent.cache_policy import cache_ttl_env
 from nerve.agent.interactive import (
     FILE_MODIFY_TOOLS,
@@ -840,6 +841,7 @@ class ClaudeBackend:
             # CLAUDE_CODE_DISABLE_CRON env var set in ``_build_env``.
             disallowed_tools=["CronCreate", "CronList", "CronDelete"],
             env=self._build_env(
+                session_id=spec.session_id,
                 cache_ttl=spec.cache_ttl,
                 inference_principal=spec.inference_principal,
                 inference_trigger=spec.inference_trigger,
@@ -949,8 +951,13 @@ class ClaudeBackend:
     def _build_env(
         self, cache_ttl: str = "5m", inference_principal: str | None = None,
         inference_trigger: str | None = None, inference_origin: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, str]:
         """Build environment variables for the SDK subprocess.
+
+        ``session_id`` tags the CLI and everything it starts with
+        ``NERVE_SESSION_ID`` (see nerve.agent.processes): the tag ties a
+        process to its session after its shell exited.
 
         ``inference_principal``, ``inference_trigger`` and
         ``inference_origin``: the principal, the trigger and the origin that
@@ -967,6 +974,8 @@ class ClaudeBackend:
         # wakeup timing (PostToolUse capture + cron-service sweep). The
         # tool itself stays available (this flag only gates the firing).
         env["CLAUDE_CODE_DISABLE_CRON"] = "1"
+        if session_id:
+            env[processes.TAG_ENV] = session_id
         # Agent teams: gates the CLI's ``SendMessage`` tool. Without it the
         # Agent tool still tells the model to resume sub-agents via
         # SendMessage — in its own description and in every spawn result —
@@ -1849,6 +1858,15 @@ class ClaudeClient(AgentClient):
                 }
             raise BackendError(detail or f"the tool call failed ({code})")
         return answer
+
+    def process_pid(self) -> int | None:
+        """The CLI subprocess's pid while it runs, else ``None``."""
+        transport = getattr(self._sdk, "_transport", None)
+        process = getattr(transport, "_process", None) if transport else None
+        if process is None or getattr(process, "returncode", 0) is not None:
+            return None
+        pid = getattr(process, "pid", None)
+        return pid if isinstance(pid, int) and pid > 0 else None
 
     def is_alive(self) -> bool:
         transport = getattr(self._sdk, "_transport", None)
