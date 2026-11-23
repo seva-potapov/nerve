@@ -43,6 +43,14 @@ describe('AgentDock', () => {
     expect(dockButton()).toBeNull();
   });
 
+  it('shows the running processes of the session even without agent records', () => {
+    useAgentStore.setState(makeAgentStoreSeed([]));
+    useChatStore.setState({ sessions: [{ id: FX_SESSION_ID, title: 't', process_count: 2 } as never] });
+    render(<AgentDock sessionId={FX_SESSION_ID} />);
+    expect(dockButton()).toHaveTextContent('2 processes');
+    useChatStore.setState({ sessions: [] });
+  });
+
   it('is absent for another session than the one the store holds', () => {
     render(<AgentDock sessionId="s-other" />);
     expect(dockButton()).toBeNull();

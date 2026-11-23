@@ -158,3 +158,19 @@ async def test_signal_tree(api):
     signalled = r.json()["signalled"]
     assert signalled[-1] == shell.pid and set(signalled[:-1]) == {k["pid"] for k in kids}
     shell.wait(5)
+
+
+@pytest.mark.asyncio
+async def test_session_list_and_status_carry_process_count(api):
+    from nerve.gateway.routes.sessions import router as sessions_router
+
+    app = api.client._transport.app
+    app.include_router(sessions_router)
+    _tagged(api, "sleep", "30")
+    await api.engine.watch_processes_once()
+    assert api.engine.process_count(SID) == 1
+    listed = (await api.client.get("/api/sessions")).json()
+    rows = listed if isinstance(listed, list) else listed.get("sessions", [])
+    assert next(s for s in rows if s["id"] == SID)["process_count"] == 1
+    status = (await api.client.get(f"/api/sessions/{SID}/status")).json()
+    assert status["process_count"] == 1

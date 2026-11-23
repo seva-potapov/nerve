@@ -997,6 +997,9 @@ class AgentEngine:
             from nerve.config import load_claude_code_plugins
             self._claude_code_plugins = load_claude_code_plugins()
 
+        # Per-session process counts for the sidebar (nerve.agent.processes).
+        self.start_process_watch()
+
         # Sync MCP servers to DB for frontend visibility
         await self._sync_mcp_servers_to_db()
 
@@ -1094,6 +1097,7 @@ class AgentEngine:
         for sid in list(self._idle_watchers):
             self._stop_idle_watcher(sid)
 
+        await self.stop_process_watch()
         if self._mcp_catalog_task is not None:
             self._mcp_catalog_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -2728,6 +2732,78 @@ class AgentEngine:
             self._process_scanner = procs.ProcessScanner()
         return self._process_scanner
 
+    PROCESS_WATCH_SECONDS = 5.0
+    _process_counts: dict[str, int] | None = None
+    _process_watch_task: asyncio.Task | None = None
+
+    def process_count(self, session_id: str) -> int:
+        """How many of the session's own processes (calls, background
+        shells, processes left running) ran at the last watch pass: the
+        sidebar keeps a session with any in its Running group."""
+        return (self._process_counts or {}).get(session_id, 0)
+
+    async def _scan_process_counts(self) -> dict[str, int]:
+        scanner = self._processes()
+        if not scanner.supported:
+            return {}
+        roots = self._process_roots()
+        sids = await asyncio.to_thread(scanner.session_ids, roots)
+        shells = {sid: self.agents.shell_task_ids(sid) for sid in sids}
+
+        def count() -> dict[str, int]:
+            out: dict[str, int] = {}
+            for sid in sids:
+                view = scanner.session_processes(sid, roots, background_tasks=shells[sid])
+                n = sum(
+                    1 for r in view["processes"]
+                    if r["role"] in procs.WORK_ROLES and r["state"] != "Z"
+                )
+                if n:
+                    out[sid] = n
+            return out
+
+        return await asyncio.to_thread(count)
+
+    async def watch_processes_once(self) -> dict[str, int]:
+        """One pass: refresh the counts and broadcast ``session_processes``
+        for every session whose count changed (to 0 included)."""
+        counts = await self._scan_process_counts()
+        old = self._process_counts or {}
+        self._process_counts = counts
+        for sid in sorted(set(old) | set(counts)):
+            if old.get(sid, 0) != counts.get(sid, 0):
+                await broadcaster.broadcast("__global__", {
+                    "type": "session_processes",
+                    "session_id": sid,
+                    "process_count": counts.get(sid, 0),
+                })
+        return counts
+
+    async def _watch_processes(self) -> None:
+        while True:
+            try:
+                await self.watch_processes_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 (the watch never dies on one pass)
+                logger.debug("process watch pass failed", exc_info=True)
+            await asyncio.sleep(self.PROCESS_WATCH_SECONDS)
+
+    def start_process_watch(self) -> None:
+        """Start the process-count watch (Linux only; idempotent)."""
+        if self._process_watch_task is not None or not self._processes().supported:
+            return
+        self._process_watch_task = asyncio.create_task(
+            self._watch_processes(), name="session-process-watch",
+        )
+
+    async def stop_process_watch(self) -> None:
+        task, self._process_watch_task = self._process_watch_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     def session_process_root(self, session_id: str) -> int | None:
         """The pid of the session's live runtime subprocess, if any."""
         client = self.sessions.get_client(session_id)
@@ -3157,6 +3233,7 @@ class AgentEngine:
             "pending_wakeup_caused_by_actor_id": wakeup.get("caused_by_actor_id"),
             "has_background_tasks": self._has_live_background_tasks(session_id),
             "background_count": self.agents.live_count(session_id),
+            "process_count": self.process_count(session_id),
         })
 
     def get_codex_ultracode_run_ids(self, session_id: str) -> set[str] | None:

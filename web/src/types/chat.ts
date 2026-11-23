@@ -201,6 +201,10 @@ export interface Session {
   // number next to the parked dot. Kept fresh by session_running and the
   // global session_agents event.
   background_count?: number;
+  // The session's own OS processes still running (calls, background shells,
+  // processes left running after their call): such a session is parked, not
+  // idle. Kept fresh by the global session_processes event.
+  process_count?: number;
   starred?: boolean;
   // Live review-loop state for this observer session (rehydrated from
   // GET /api/sessions, kept fresh by the global review_loop_update event;

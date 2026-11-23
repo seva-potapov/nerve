@@ -70,3 +70,25 @@ describe('the parked dot of a session whose agents run between turns', () => {
     expect(titles).toContain('Background job running');
   });
 });
+
+describe('a session whose processes still run between turns', () => {
+  it('shows the parked dot and says how many processes run', () => {
+    const quiet: Session = {
+      id: 'sweep', title: 'sweep', source: 'web', updated_at: new Date().toISOString(), starred: true,
+      is_running: false, has_background_tasks: false, background_count: 0, process_count: 3,
+    };
+    const { container } = renderSidebar([quiet]);
+    const titles = [...container.querySelectorAll('[title]')].map(el => el.getAttribute('title'));
+    expect(titles).toContain('3 processes running');
+    expect(container.querySelector('[class*="animate-ping"]')).not.toBeNull();
+  });
+
+  it('is idle once its processes are gone', () => {
+    const done: Session = {
+      id: 'done', title: 'done', source: 'web', updated_at: new Date().toISOString(), starred: true,
+      is_running: false, process_count: 0,
+    };
+    const { container } = renderSidebar([done]);
+    expect(container.querySelector('[class*="animate-ping"]')).toBeNull();
+  });
+});

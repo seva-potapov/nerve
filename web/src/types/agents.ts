@@ -93,7 +93,8 @@ export type AgentWSMessage =
   | { type: 'agent_update'; session_id: string; agents: AgentView[]; summary: AgentSummary }
   | { type: 'agent_event'; session_id: string; agent_id: string; item: AgentEventItem }
   | { type: 'queue_update'; session_id: string; queue: QueueEntryView[]; removed?: QueueRemoval[] }
-  | { type: 'session_agents'; session_id: string; background_count: number; has_background_tasks: boolean };
+  | { type: 'session_agents'; session_id: string; background_count: number; has_background_tasks: boolean }
+  | { type: 'session_processes'; session_id: string; process_count: number };
 
 // ------------------------------------------------------------------ //
 //  OS processes of a session (GET /api/sessions/{id}/processes)       //

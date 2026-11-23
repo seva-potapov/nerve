@@ -497,3 +497,47 @@ def test_claude_client_process_pid():
     assert client.process_pid() is None
     client._sdk = SimpleNamespace(_transport=None)
     assert client.process_pid() is None
+
+
+# --------------------------------------------------------------------------- #
+#  Process counts: the watch pass                                              #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_watch_pass_counts_work_processes_and_broadcasts_changes(fake, monkeypatch):
+    from nerve.agent import engine as engine_mod
+    from nerve.agent.engine import AgentEngine
+
+    fake.add(100, 1, "claude", ["claude"])
+    fake.add(101, 100, "node", ["node", "mcp"])                                  # internal
+    fake.add(102, 100, "bash", ["bash"], fd1=fake.task_file("bfgaaaaa1"))       # call
+    fake.add(200, 1, "sleep", ["sleep"], env={procs.TAG_ENV: OTHER})            # orphan
+    fake.add(201, 200, "zz", [], state="Z", env={procs.TAG_ENV: OTHER}, cwd=None)
+
+    eng = AgentEngine.__new__(AgentEngine)
+    eng.agents = _Agents()
+    eng.sessions = _Sessions({SID: SimpleNamespace(process_pid=lambda: 100)})
+    eng._process_scanner = procs.ProcessScanner(str(fake.root), self_pid=999999)
+    sent = []
+
+    async def broadcast(channel, msg):
+        sent.append((channel, msg))
+
+    monkeypatch.setattr(engine_mod.broadcaster, "broadcast", broadcast)
+    monkeypatch.setattr(procs.task_output, "output_roots", lambda: fake.oroots)
+
+    assert await eng.watch_processes_once() == {SID: 1, OTHER: 1}
+    assert eng.process_count(SID) == 1 and eng.process_count("nope") == 0
+    assert sorted(m["session_id"] for _, m in sent) == sorted([OTHER, SID])
+    assert all(c == "__global__" and m["type"] == "session_processes" for c, m in sent)
+
+    sent.clear()
+    assert await eng.watch_processes_once() == {SID: 1, OTHER: 1}
+    assert sent == []                                    # nothing changed
+
+    import shutil
+    shutil.rmtree(fake.root / "200")
+    eng._process_scanner._snap = None
+    await eng.watch_processes_once()
+    assert sent == [("__global__", {"type": "session_processes", "session_id": OTHER, "process_count": 0})]

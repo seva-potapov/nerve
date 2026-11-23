@@ -1174,6 +1174,7 @@ Response: {
   "status": "active",
   "is_running": true,
   "background_count": 2,
+  "process_count": 0,
   "sdk_session_id": "8fbba4a4-...",
   "connected_at": "2026-02-27T12:00:00+00:00",
   "parent_session_id": null,
@@ -2576,6 +2577,10 @@ those for another session. Events marked *global* go to every socket.
 { type: "agent_event", session_id: "s-1234", agent_id: "ag_3f9a1c2b7d4e", item: AgentEventItem }
 // Live-agent counts changed between turns (global, debounced 1 s)
 { type: "session_agents", session_id: "s-1234", background_count: 5, has_background_tasks: true }
+// The count of a session's own running processes (calls, background shells,
+// processes left running) changed (global, checked every 5 s; Linux only).
+// GET /api/sessions rows and session_running carry process_count too.
+{ type: "session_processes", session_id: "s-1234", process_count: 3 }
 // The turn queue: the full queue, plus what just left it (never buffered)
 { type: "queue_update", session_id: "s-1234", queue: [QueueEntryView], removed?: [{ queue_id: "q_9c1d2e3f" | null, client_msg_id: "4b6f…" | null, reason: "started" | "cancelled" | "duplicate" | "refused" }] }
 // "refused": Nerve is shutting down and did not run the message (an error event follows)

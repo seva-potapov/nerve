@@ -364,6 +364,8 @@ export function handleSessionRunning(
     has_background_tasks: !!msg.has_background_tasks,
     // The live agent count; an older server sends only the flag.
     background_count: msg.background_count ?? (msg.has_background_tasks ? sess.background_count : 0),
+    // Processes outlive turns: an older server sends none, keep what we had.
+    process_count: msg.process_count ?? sess.process_count,
   });
   set(s => {
     const updates: Record<string, unknown> = {

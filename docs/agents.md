@@ -84,7 +84,10 @@ session totals still come from the runtime and are not changed by it.
   ended) and CLI internals (folded). Each row shows the redacted command,
   PID, age, CPU and memory; calls, background shells and leftovers have a
   two-step stop (TERM to the process and its children, KILL after 5 s).
-  See `GET /api/sessions/{id}/processes` in [api.md](api.md).
+  See `GET /api/sessions/{id}/processes` in [api.md](api.md). A session
+  whose processes still run counts as busy: the sidebar keeps it in Running
+  with the parked dot ("N processes running"), and the dock shows
+  "N processes" and opens the panel, also when the session has no agents.
 - **Agent tabs.** One per opened agent: the live transcript, or a shell's
   output, or a workflow's tree. They never close on their own.
 - **Split Stop.** The red button stops the turn. Its caret offers "Stop turn

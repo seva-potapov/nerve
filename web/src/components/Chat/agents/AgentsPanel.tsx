@@ -37,6 +37,7 @@ export function AgentsPanel() {
   const quietAfter = useAgentStore(s => s.capabilities.quiet_after_minutes);
   const focusNonce = useAgentStore(s => s.focusNonce);
   const sessionId = useAgentStore(s => s.sessionId);
+  const processCount = useChatStore(s => s.sessions.find(x => x.id === sessionId)?.process_count ?? 0);
   const self = useAuthStore(s => s.viewer?.id ?? null);
   const anyLive = useMemo(() => Object.values(agents).some(a => !a.ambient && isLive(a)), [agents]);
   const now = useNow(1000, anyLive);
@@ -229,7 +230,7 @@ export function AgentsPanel() {
       </header>
 
       <div className="flex-1 overflow-y-auto @container">
-        {empty ? (
+        {empty && processCount > 0 ? null : empty ? (
           <div className="py-12 flex flex-col items-center justify-center gap-1.5 px-6 text-center">
             <ListTree size={20} className="text-text-faint" aria-hidden="true" />
             <p className="text-sm text-text-muted">No agents in this session yet.</p>

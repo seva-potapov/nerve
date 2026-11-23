@@ -45,6 +45,9 @@ CACHE_SECONDS = 1.0
 ROLES = ("cli", "call", "background", "internal", "orphan")
 # Roles a user may signal: never the CLI itself or its own helpers.
 SIGNALABLE_ROLES = frozenset({"call", "background", "orphan"})
+# The session's own work (what "N processes running" counts): not the CLI
+# or its helpers.
+WORK_ROLES = SIGNALABLE_ROLES
 
 
 def _clk_tck() -> int:
@@ -441,6 +444,11 @@ class ProcessScanner:
             "scanned_at": datetime.now(UTC).isoformat(),
             "processes": procs,
         }
+
+    def session_ids(self, roots: Mapping[str, int], *, max_age: float = CACHE_SECONDS) -> set[str]:
+        """Sessions with a live CLI or at least one tagged process."""
+        snap = self.snapshot(roots, max_age=max_age)
+        return {sid for sid, pid in roots.items() if pid in snap.stats} | set(snap.tags.values())
 
     # -- signals -------------------------------------------------------- #
 
