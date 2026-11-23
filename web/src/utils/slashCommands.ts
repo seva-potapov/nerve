@@ -31,6 +31,7 @@ export const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: 'context', args: '', help: 'Show what fills the context window' },
   { name: 'sessions', args: '', help: 'Switch to another session' },
   { name: 'fork', args: '', help: 'Fork this chat into a new session' },
+  { name: 'effort', args: '<level>', help: "Set this session's reasoning effort" },
   { name: 'model', args: '<name>', help: "Set this session's model" },
   { name: 'star', args: '', help: 'Keep this session from closing when idle' },
   { name: 'unstar', args: '', help: 'Let this session close when idle again' },
@@ -38,6 +39,12 @@ export const BUILTIN_COMMANDS: SlashCommand[] = [
   { name: 'doctor', args: '', help: 'Run the health checks' },
   { name: 'help', args: '', help: 'List the commands and shortcuts' },
 ];
+
+/**
+ * The reasoning effort levels, weakest first: the composer's effort picker
+ * and `/effort` when the server's list carries no choices.
+ */
+export const DEFAULT_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export type ArgKind = 'none' | 'required' | 'optional';
 

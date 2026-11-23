@@ -43,6 +43,7 @@ COMMANDS: tuple[ChatCommand, ...] = (
     ChatCommand("sessions", "", "Switch to another session", _BOTH),
     ChatCommand("session", "[id]", "Show the current session or switch to one", (TELEGRAM,)),
     ChatCommand("fork", "", "Fork this chat into a new session", (WEB,)),
+    ChatCommand("effort", "<level>", "Set this session's reasoning effort", (WEB,)),
     ChatCommand("model", "<name>", "Set this session's model", (WEB,)),
     ChatCommand("star", "", "Keep this session from closing when idle", _BOTH),
     ChatCommand("unstar", "", "Let this session close when idle again", _BOTH),

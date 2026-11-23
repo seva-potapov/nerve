@@ -4,7 +4,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { findSessionById } from '../../utils/findSession';
 import { forkChat } from '../../utils/forkChat';
 import { modelLabel, type ModelEntry } from '../../utils/modelNames';
-import { argKind, commandUsage, type SlashCommand } from '../../utils/slashCommands';
+import { DEFAULT_EFFORT_LEVELS, argKind, commandUsage, type SlashCommand } from '../../utils/slashCommands';
 import { formatTokens } from './contextUsage';
 
 /**
@@ -183,6 +183,22 @@ export async function runSlashCommand(command: SlashCommand, args: string, ctx: 
     case 'doctor':
       ctx.navigate('/diagnostics');
       return;
+
+    case 'effort': {
+      const levels = command.choices ?? DEFAULT_EFFORT_LEVELS;
+      const level = args.toLowerCase();
+      if (!levels.includes(level)) return fail(`Unknown effort "${args}". Use one of: ${levels.join(', ')}.`);
+      if (isNew) return fail('Send a message first, then set the effort of this chat.');
+      if (store.isStreaming) return fail('The effort can change once the turn ends.');
+      // The store's action PATCHes {effort} and keeps the picker in step; it
+      // puts the old effort back when the server refuses the change.
+      await store.setSessionEffort(sessionId, level);
+      const now = useChatStore.getState();
+      const after = findSessionById(sessionId, now.sessions, now.archivedSessions, now.systemSessions);
+      if (after && (after.effort ?? null) !== level) return fail('Could not set the effort.');
+      ctx.report({ tone: 'success', text: `Effort set to ${level} for this chat.` });
+      return;
+    }
 
     case 'model': {
       if (ctx.modelLocked) return fail(ctx.modelLocked);

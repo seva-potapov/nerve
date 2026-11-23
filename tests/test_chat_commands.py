@@ -4,6 +4,7 @@ and ``/context``."""
 
 from __future__ import annotations
 
+import asyncio
 import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -51,7 +52,7 @@ def test_each_surface_has_its_commands():
     web = {c.name for c in commands_for("web")}
     assert {"compact", "context", "new", "stop", "star", "unstar", "sessions", "plans", "doctor"} <= telegram & web
     assert {"restart", "pair", "start", "reply", "session"} <= telegram - web
-    assert {"fork", "model", "help"} <= web - telegram
+    assert {"fork", "effort", "model", "help"} <= web - telegram
     with pytest.raises(ValueError):
         commands_for("slack")
 
@@ -250,3 +251,26 @@ async def test_the_router_compacts_without_an_actor():
     assert await router.compact_session("s-1", "keep it") == REPORT
     engine.compact_session.assert_awaited_once_with("s-1", actor=None, instructions="keep it")
     assert await router.session_context("s-1") == VIEW
+
+
+@pytest.mark.asyncio
+async def test_telegram_compact_in_a_topic_compacts_the_topics_session():
+    async def _slow_compact(*_a):
+        await asyncio.sleep(0.05)  # long enough for the typing task to run
+        return REPORT
+
+    ch = _telegram(compact_session=AsyncMock(side_effect=_slow_compact))
+    ch._topics_enabled = lambda: True
+    typing_targets: list[str] = []
+
+    async def _typing(target):
+        typing_targets.append(target)
+
+    ch.send_typing = _typing
+    update, message, note = _update()
+    message.is_topic_message = True
+    message.message_thread_id = 77
+    await ch._handle_compact(update, SimpleNamespace(args=[]))
+    ch.router.get_last_session.assert_awaited_once_with("telegram:4242:77")
+    assert typing_targets[:1] == ["4242:77"]
+    note.edit_text.assert_awaited_once()

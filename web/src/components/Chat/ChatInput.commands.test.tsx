@@ -218,6 +218,26 @@ describe('sending', () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it('names the valid levels for a bad /effort', async () => {
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/effort huge{Enter}');
+    expect(within(status()).getByText('Unknown effort "huge". Use one of: low, medium, high, xhigh, max.')).toBeInTheDocument();
+    expect(api.updateSession).not.toHaveBeenCalled();
+  });
+
+  it('sets the effort of this chat through the store, so the picker follows', async () => {
+    const setSessionEffort = vi.spyOn(useChatStore.getState(), 'setSessionEffort');
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/effort HIGH{Enter}');
+    expect(setSessionEffort).toHaveBeenCalledWith('s1', 'high');
+    expect(api.updateSession).toHaveBeenCalledWith('s1', { effort: 'high' });
+    expect(await within(status()).findByText('Effort set to high for this chat.')).toBeInTheDocument();
+    expect(useChatStore.getState().sessions[0].effort).toBe('high');
+    expect(screen.getByRole('combobox', { name: 'Effort' })).toHaveValue('high');
+  });
+
   it('switches the model by its menu name', async () => {
     const user = userEvent.setup();
     await renderComposer();
