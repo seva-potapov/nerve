@@ -1774,6 +1774,18 @@ class AgentRegistry:
         st = self._sessions.get(sid)
         return st.records.get(agent_id) if st else None
 
+    def shell_task_ids(self, sid: str) -> dict[str, str]:
+        """Task id -> agent id of the session's background shells and
+        monitors in memory, live or ended (a process can outlive its
+        record)."""
+        st = self._sessions.get(sid)
+        if st is None:
+            return {}
+        return {
+            r.task_id: r.id for r in st.records.values()
+            if r.kind in ("shell", "monitor") and r.task_id
+        }
+
     def session_backend(self, sid: str) -> str | None:
         """The backend of the session's last client, when one connected."""
         st = self._sessions.get(sid)

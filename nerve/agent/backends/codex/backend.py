@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, AsyncIterator
 
 from nerve import paths
+from nerve.agent import processes
 from nerve.agent.backends import events as ev
 from nerve.agent.backends.base import (
     AgentClient,
@@ -566,6 +567,10 @@ class CodexBackend:
     def build_env(self, spec: SessionSpec) -> dict[str, str]:
         env = _inherited_env()
         env["CODEX_HOME"] = self._home_dir()
+        # Ties the app-server and every command it runs to the session
+        # (nerve.agent.processes).
+        if spec.session_id:
+            env[processes.TAG_ENV] = spec.session_id
         env.update(self.endpoint_env(spec.inference_principal))
         # Session-bound bearer token for the nerve MCP endpoint —
         # referenced from the MCP config via bearer_token_env_var so the
@@ -2384,6 +2389,14 @@ class CodexClient(AgentClient):
 
     def is_alive(self) -> bool:
         return self._transport.is_alive()
+
+    def process_pid(self) -> int | None:
+        """The app-server subprocess's pid while it runs, else ``None``."""
+        proc = getattr(self._transport, "_proc", None)
+        if proc is None or getattr(proc, "returncode", 0) is not None:
+            return None
+        pid = getattr(proc, "pid", None)
+        return pid if isinstance(pid, int) and pid > 0 else None
 
     # -- idle stream: not supported (no autonomous turns) ------------------ #
 

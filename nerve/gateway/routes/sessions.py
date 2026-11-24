@@ -407,6 +407,9 @@ async def _decorate(deps, sessions: list[dict], *, add_needs_you: bool = False) 
         s["has_background_tasks"] = deps.engine.has_live_background_tasks(s["id"])
         # How many agents still run (the sidebar's count).
         s["background_count"] = _background_count(deps, s["id"], s["has_background_tasks"])
+        # How many of its own OS processes run (calls, background shells,
+        # processes left running): such a session is not idle.
+        s["process_count"] = _process_count(deps, s["id"])
         if s["id"] in loops:
             s["review_loop"] = _loop_summary(loops[s["id"]])
         _stamp_daybreak(s)
@@ -425,6 +428,18 @@ def _background_count(deps, session_id: str, has_background: bool | None = None)
     if has_background is None:
         has_background = bool(deps.engine.has_live_background_tasks(session_id))
     return int(bool(has_background))
+
+
+def _process_count(deps, session_id: str) -> int:
+    """The session's running processes at the last watch pass (0 when the
+    engine has no process watch)."""
+    count = getattr(deps.engine, "process_count", None)
+    if count is None:
+        return 0
+    try:
+        return int(count(session_id))
+    except Exception:  # noqa: BLE001 — enrichment must never break listing
+        return 0
 
 
 def _page_meta(page: list[dict], offset: int, total: int, limit: int | None) -> dict:
@@ -951,6 +966,7 @@ async def session_status(session_id: str, actor: Actor = Depends(require_auth)):
         "status": session.get("status", "unknown"),
         "is_running": is_running,
         "background_count": _background_count(deps, session_id),
+        "process_count": _process_count(deps, session_id),
         "awaiting_input": session_id in get_awaiting_ids(),
         "sdk_session_id": session.get("sdk_session_id"),
         "connected_at": session.get("connected_at"),

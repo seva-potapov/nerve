@@ -11,13 +11,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
-import tempfile
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
+from nerve.agent import task_output
 from nerve.agent.agents.errors import AgentControlError
 from nerve.gateway.auth import require_auth
 from nerve.gateway.routes._deps import get_deps
@@ -32,8 +31,6 @@ TRANSCRIPT_LIMIT_MAX = 500
 OUTPUT_TAIL_DEFAULT = 65_536
 OUTPUT_TAIL_MAX = 262_144
 QUEUE_ORDER_MAX = 500
-# A CLI task id (the output file is named after it).
-_TASK_ID_RE = re.compile(r"^[a-z][0-9a-z]{7,31}$")
 
 
 def _error(status: int, code: str, message: str, **extra: Any) -> HTTPException:
@@ -140,33 +137,15 @@ async def get_agent_transcript(
 
 
 def _output_roots() -> list[str]:
-    """Where the Claude CLI writes background task output: its per-user
-    directory under the temp dir. The CLI uses ``/tmp`` even where Python's
-    temp dir is elsewhere (macOS sets ``TMPDIR`` to a per-user folder), so
-    both count."""
-    uid = getattr(os, "getuid", lambda: 0)()
-    return sorted({
-        os.path.realpath(os.path.join(tempfile.gettempdir(), f"claude-{uid}")),
-        os.path.realpath(f"/tmp/claude-{uid}"),
-    })
+    """Where the Claude CLI writes task output (see
+    :func:`nerve.agent.task_output.output_roots`)."""
+    return task_output.output_roots()
 
 
 def _safe_output_path(output_file: str | None, task_id: str | None) -> str | None:
     """The real path of a task's output file, or ``None`` unless it is
-    ``<task_id>.output`` inside the CLI's temp root (no symlink out, no other
-    file)."""
-    if not output_file or not task_id or not _TASK_ID_RE.match(task_id):
-        return None
-    name = f"{task_id}.output"
-    if os.path.basename(output_file) != name:
-        return None
-    real = os.path.realpath(output_file)
-    if os.path.basename(real) != name:
-        return None
-    for root in _output_roots():
-        if real.startswith(root + os.sep):
-            return real
-    return None
+    ``<task_id>.output`` inside the CLI's temp root."""
+    return task_output.safe_output_path(output_file, task_id, roots=_output_roots())
 
 
 def _read_tail(path: str, tail_bytes: int) -> tuple[str, int, bool] | None:
@@ -211,6 +190,50 @@ async def get_agent_output(
         "agent_id": rec.id, "text": text, "size": size,
         "truncated": truncated, "available": True,
     }
+
+
+# --------------------------------------------------------------------------- #
+#  OS processes                                                                #
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/api/sessions/{session_id}/processes")
+async def list_processes(session_id: str, actor: Actor = Depends(require_auth)):
+    """The OS processes the session started (see ``nerve.agent.processes``):
+    its CLI, Bash calls, background shells, CLI helpers and processes left
+    running, with CPU, memory and a redacted command. ``supported`` is
+    False where there is no ``/proc``."""
+    deps = get_deps()
+    await _require_session(deps, session_id)
+    return await deps.engine.session_processes(session_id)
+
+
+@router.post("/api/sessions/{session_id}/processes/{pid}/signal")
+async def signal_process(
+    session_id: str, pid: int,
+    body: dict | None = Body(default=None),
+    actor: Actor = Depends(require_auth),
+):
+    """Send ``signal`` (``TERM``, the default, or ``KILL``) to one of the
+    session's processes; ``tree`` also signals its descendants. Pass the
+    listed ``start_ticks`` so a reused pid is refused. The CLI and its
+    helpers are refused (403 ``not_signalable``)."""
+    deps = get_deps()
+    await _require_session(deps, session_id)
+    req = body if isinstance(body, dict) else {}
+    start_ticks = req.get("start_ticks")
+    if start_ticks is not None and (isinstance(start_ticks, bool) or not isinstance(start_ticks, int)):
+        raise _error(422, "bad_start_ticks", "start_ticks must be an integer")
+    sig = req.get("signal", "TERM")
+    if sig not in ("TERM", "KILL"):
+        raise _error(422, "bad_signal", 'signal must be "TERM" or "KILL"')
+    try:
+        return await deps.engine.signal_session_process(
+            session_id, pid, signal_name=sig, start_ticks=start_ticks,
+            tree=bool(req.get("tree", False)), attribution=attribution_for(actor),
+        )
+    except AgentControlError as e:
+        raise _control_error(e) from None
 
 
 # --------------------------------------------------------------------------- #

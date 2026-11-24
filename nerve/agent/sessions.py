@@ -494,6 +494,10 @@ class SessionManager:
         """Get the SDK client for a session (or None)."""
         return self._clients.get(session_id)
 
+    def client_items(self) -> list[tuple[str, Any]]:
+        """Every live ``(session_id, client)`` pair."""
+        return list(self._clients.items())
+
     def set_client(self, session_id: str, client: Any) -> None:
         """Register an SDK client for a session."""
         self._clients[session_id] = client

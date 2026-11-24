@@ -397,6 +397,13 @@ describe('agent events in the dispatcher', () => {
     expect(useAgentStore.getState().queue).toEqual([]);
   });
 
+  it('applies session_processes to any listed session (a global event)', () => {
+    dispatch({ type: 'session_processes', session_id: 's-other', process_count: 4 });
+    expect(useChatStore.getState().sessions.find(x => x.id === 's-other')!.process_count).toBe(4);
+    dispatch({ type: 'session_processes', session_id: 's-other', process_count: 0 });
+    expect(useChatStore.getState().sessions.find(x => x.id === 's-other')!.process_count).toBe(0);
+  });
+
   it('applies session_agents to any listed session (a global event)', () => {
     useChatStore.setState({ searchResults: [row('s-other')] });
 

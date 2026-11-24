@@ -16,8 +16,9 @@ const ANNOUNCE_NAMES = 3;
 /**
  * One line above the composer while the session has agent records: how many
  * run, how many need attention, how many are done, and what the most recently
- * active one is doing. The whole line opens the Agents panel and puts focus
- * in its list. Absent when the session has no records.
+ * active one is doing, plus how many of the session's processes run. The
+ * whole line opens the Agents panel and puts focus in its list. Absent when
+ * the session has no records and no processes.
  *
  * A polite live region announces agents that settle ("build-chart finished"),
  * throttled to one message per 5 s.
@@ -33,8 +34,10 @@ export function AgentDock({ sessionId }: { sessionId: string }) {
   const now = useNow(15_000, anyLive);
   const line = useMemo(() => dockLine(agents, seen, now, quietAfter), [agents, seen, now, quietAfter]);
   const announcement = useSettledAnnouncements();
+  // The session's own OS processes (calls, background shells, leftovers).
+  const processes = useChatStore(s => s.sessions.find(x => x.id === sessionId)?.process_count ?? 0);
 
-  const visible = storeSession === sessionId && line.visible;
+  const visible = storeSession === sessionId && (line.visible || processes > 0);
   return (
     <>
       {visible && (
@@ -68,6 +71,9 @@ export function AgentDock({ sessionId }: { sessionId: string }) {
             )}
             {line.running === 0 && line.attention === 0 && line.done === 0 && line.ended > 0 && (
               <span className="shrink-0">{line.ended} ended</span>
+            )}
+            {processes > 0 && (
+              <span className="shrink-0">{processes} process{processes === 1 ? '' : 'es'}</span>
             )}
             {line.headline && (
               <span className="truncate min-w-0 text-text-secondary">{line.headline.text}</span>

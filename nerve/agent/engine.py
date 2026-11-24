@@ -33,6 +33,10 @@ from nerve.agent.agents.errors import (
     AlreadyStarted,
     NoRuntime,
     NotOwner,
+    NotSignalable,
+    ProcessChanged,
+    ProcessesUnsupported,
+    ProcessNotFound,
     QueueEntryNotFound,
     Unsupported,
 )
@@ -58,6 +62,7 @@ from nerve.agent.backends import (
     TurnRefusedError,
     build_backends,
 )
+from nerve.agent import processes as procs
 from nerve.agent.backends.events import TurnStatus
 from nerve.agent.cache_policy import resolve_cache_ttl
 from nerve.agent.effort import session_effort
@@ -1031,6 +1036,9 @@ class AgentEngine:
             from nerve.config import load_claude_code_plugins
             self._claude_code_plugins = load_claude_code_plugins()
 
+        # Per-session process counts for the sidebar (nerve.agent.processes).
+        self.start_process_watch()
+
         # Sync MCP servers to DB for frontend visibility
         await self._sync_mcp_servers_to_db()
 
@@ -1135,6 +1143,7 @@ class AgentEngine:
         for sid in list(self._idle_watchers):
             self._stop_idle_watcher(sid)
 
+        await self.stop_process_watch()
         if self._mcp_catalog_task is not None:
             self._mcp_catalog_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -2138,11 +2147,21 @@ class AgentEngine:
             )
             await self.db.update_session_fields(session_id, {"model": resolved_model})
 
-            # A brand-new runtime process starts its cumulative cost counter
-            # at zero — zero the persisted baseline so the first turn's
-            # delta is exact (claude-only; codex reports per-turn cost).
+            # The cost counter of a new runtime process starts at zero for a
+            # new conversation. For a conversation that the process resumes
+            # or forks from, it starts at the cost that the runtime saved
+            # for that conversation. Store the baseline for that start, so
+            # that the first turn's delta does not hold the cost of earlier
+            # turns again (claude-only; codex reports per-turn cost).
             if backend.capabilities.cost_is_cumulative:
-                await self._reset_cost_baseline(session_id)
+                await self._set_cost_baseline(
+                    session_id,
+                    await self._cost_counter_start(
+                        backend, fork_from if is_fork else sdk_resume_id,
+                        session_cwd,
+                    ),
+                    same_conversation=bool(sdk_resume_id) and not is_fork,
+                )
 
             logger.info(
                 "Created persistent %s client for session %s%s",
@@ -2239,13 +2258,49 @@ class AgentEngine:
             "status": "ok" if bullets else "unavailable",
         })
 
-    async def _reset_cost_baseline(self, session_id: str) -> None:
-        """Zero the persisted SDK cumulative-cost baseline for a session.
+    async def _cost_counter_start(
+        self, backend: AgentBackend, native_id: str | None, cwd: str,
+    ) -> float:
+        """Return the value at which the cost counter of a new client
+        starts: zero for a new conversation, and what the backend reports
+        for the conversation *native_id* that the client resumes or forks
+        from (``AgentBackend.cost_counter_start``).
 
-        Called right after a new CLI client is created: the fresh process
-        reports ``total_cost_usd`` cumulatively from zero, so the stored
-        high-water mark from the previous client must not be diffed
-        against it (see compute_turn_cost in nerve.db.usage).
+        Accounting must never break a turn, so a failure is logged and the
+        counter is taken to start at zero.
+        """
+        read = getattr(backend, "cost_counter_start", None)
+        if not native_id or read is None:
+            return 0.0
+        try:
+            start = await asyncio.to_thread(read, native_id, cwd)
+        except Exception as e:
+            logger.warning(
+                "Failed to read the cost counter start of %s: %s",
+                native_id[:12], e,
+            )
+            return 0.0
+        if isinstance(start, bool) or not isinstance(start, (int, float)):
+            return 0.0
+        return float(start) if start > 0 and start != float("inf") else 0.0
+
+    async def _set_cost_baseline(
+        self, session_id: str, start: float, *, same_conversation: bool = False,
+    ) -> None:
+        """Store the SDK cumulative-cost baseline for a session.
+
+        Called right after a new CLI client is created, with the value
+        *start* at which the new process starts ``total_cost_usd``. The
+        first turn's cost is the difference to the baseline (see
+        compute_turn_cost in nerve.db.usage).
+
+        The baseline is *start*. A client that resumes the session's own
+        conversation (*same_conversation*) keeps a stored value that is
+        lower: the previous process then spent after the last result that
+        the engine recorded (a turn that was stopped, for example), and
+        that spend goes to the next turn, as it does within one process.
+        A stored value that is higher is not kept: the previous process
+        was killed and did not save its total.
 
         Re-reads the session row so concurrent metadata writers are not
         clobbered; accounting must never break a turn, so failures are
@@ -2256,12 +2311,17 @@ class AgentEngine:
             if not session:
                 return
             meta = json.loads(session.get("metadata") or "{}")
-            if meta.get("_sdk_cumulative_cost"):
-                meta["_sdk_cumulative_cost"] = 0
+            stored = meta.get("_sdk_cumulative_cost") or 0
+            baseline = (
+                min(stored, start) if same_conversation and stored > 0
+                else start
+            )
+            if stored != baseline:
+                meta["_sdk_cumulative_cost"] = baseline
                 await self.db.update_session_metadata(session_id, meta)
         except Exception as e:
             logger.warning(
-                "Failed to reset cost baseline for %s: %s", session_id, e,
+                "Failed to set cost baseline for %s: %s", session_id, e,
             )
 
     async def _discard_client(
@@ -2755,6 +2815,235 @@ class AgentEngine:
         excluded) — the sidebar's background count."""
         return self.agents.live_count(session_id)
 
+    # -- OS processes (nerve.agent.processes) --------------------------- #
+
+    _process_scanner: procs.ProcessScanner | None = None
+    _process_kill_tasks: set | None = None
+    PROCESS_KILL_AFTER = 5.0
+
+    def _processes(self) -> procs.ProcessScanner:
+        if self._process_scanner is None:
+            self._process_scanner = procs.ProcessScanner()
+        return self._process_scanner
+
+    PROCESS_WATCH_SECONDS = 5.0
+    _process_counts: dict[str, int] | None = None
+    _process_watch_task: asyncio.Task | None = None
+
+    def process_count(self, session_id: str) -> int:
+        """How many of the session's own processes (calls, background
+        shells, processes left running) ran at the last watch pass: the
+        sidebar keeps a session with any in its Running group."""
+        return (self._process_counts or {}).get(session_id, 0)
+
+    async def _scan_process_counts(self) -> dict[str, int]:
+        scanner = self._processes()
+        if not scanner.supported:
+            return {}
+        roots = self._process_roots()
+        sids = await asyncio.to_thread(scanner.session_ids, roots)
+        shells = {sid: self.agents.shell_task_ids(sid) for sid in sids}
+
+        def count() -> dict[str, int]:
+            out: dict[str, int] = {}
+            for sid in sids:
+                view = scanner.session_processes(sid, roots, background_tasks=shells[sid])
+                n = sum(
+                    1 for r in view["processes"]
+                    if r["role"] in procs.WORK_ROLES and r["state"] != "Z"
+                )
+                if n:
+                    out[sid] = n
+            return out
+
+        return await asyncio.to_thread(count)
+
+    async def watch_processes_once(self) -> dict[str, int]:
+        """One pass: refresh the counts and broadcast ``session_processes``
+        for every session whose count changed (to 0 included)."""
+        counts = await self._scan_process_counts()
+        old = self._process_counts or {}
+        self._process_counts = counts
+        for sid in sorted(set(old) | set(counts)):
+            if old.get(sid, 0) != counts.get(sid, 0):
+                await broadcaster.broadcast("__global__", {
+                    "type": "session_processes",
+                    "session_id": sid,
+                    "process_count": counts.get(sid, 0),
+                })
+        return counts
+
+    async def _watch_processes(self) -> None:
+        while True:
+            try:
+                await self.watch_processes_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 (the watch never dies on one pass)
+                logger.debug("process watch pass failed", exc_info=True)
+            await asyncio.sleep(self.PROCESS_WATCH_SECONDS)
+
+    def start_process_watch(self) -> None:
+        """Start the process-count watch (Linux only; idempotent)."""
+        if self._process_watch_task is not None or not self._processes().supported:
+            return
+        self._process_watch_task = asyncio.create_task(
+            self._watch_processes(), name="session-process-watch",
+        )
+
+    async def stop_process_watch(self) -> None:
+        task, self._process_watch_task = self._process_watch_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    def session_process_root(self, session_id: str) -> int | None:
+        """The pid of the session's live runtime subprocess, if any."""
+        client = self.sessions.get_client(session_id)
+        fn = getattr(client, "process_pid", None) if client is not None else None
+        try:
+            pid = fn() if callable(fn) else None
+        except Exception:  # noqa: BLE001 (a listing never fails on one client)
+            return None
+        return pid if isinstance(pid, int) and pid > 0 else None
+
+    def _process_roots(self) -> dict[str, int]:
+        roots: dict[str, int] = {}
+        for sid, _client in self.sessions.client_items():
+            pid = self.session_process_root(sid)
+            if pid is not None:
+                roots[sid] = pid
+        return roots
+
+    async def session_processes(self, session_id: str, *, fresh: bool = False) -> dict:
+        """The OS processes the session started (``{"supported": False}``
+        without ``/proc``). Works without a live runtime: then only the
+        processes tagged for the session are found, as ``orphan``."""
+        scanner = self._processes()
+        roots = self._process_roots()
+        background = self.agents.shell_task_ids(session_id)
+        redact = procs.Redactor(procs.known_secrets(self.config))
+        view = await asyncio.to_thread(
+            scanner.session_processes, session_id, roots,
+            background_tasks=background, redact=redact,
+            max_age=0.0 if fresh else procs.CACHE_SECONDS,
+        )
+        view["session_id"] = session_id
+        return view
+
+    async def signal_session_process(
+        self, session_id: str, pid: int, *, signal_name: str = "TERM",
+        start_ticks: int | None = None, tree: bool = False,
+        attribution: Attribution = UNATTRIBUTED,
+    ) -> dict:
+        """Signal one of the session's processes (``TERM`` or ``KILL``).
+
+        Re-scans first and refuses a pid that is not the session's
+        (:class:`ProcessNotFound`), whose start time is not ``start_ticks``
+        (:class:`ProcessChanged`: the pid was reused), or that is the CLI,
+        one of its helpers or Nerve (:class:`NotSignalable`). A live
+        background shell or monitor is stopped through its agent stop. With
+        ``tree`` the session's descendants of the process are signalled
+        too, leaves first. A ``TERM`` is followed by ``KILL`` after
+        :attr:`PROCESS_KILL_AFTER` seconds for whatever still runs.
+        """
+        import signal as _signal
+
+        sig = {"TERM": _signal.SIGTERM, "KILL": _signal.SIGKILL}.get(str(signal_name).upper())
+        if sig is None:
+            raise NotSignalable("signal must be TERM or KILL")
+        view = await self.session_processes(session_id, fresh=True)
+        if not view.get("supported"):
+            raise ProcessesUnsupported("Processes cannot be listed on this platform")
+        rows = {r["pid"]: r for r in view["processes"]}
+        row = rows.get(pid)
+        if row is None:
+            raise ProcessNotFound(f"Process {pid} is not running in this session")
+        if start_ticks is not None and row["start_ticks"] != start_ticks:
+            raise ProcessChanged(f"Process {pid} is not the one listed any more")
+        if pid in (0, 1, os.getpid()) or row["role"] not in procs.SIGNALABLE_ROLES:
+            raise NotSignalable(
+                f"Process {pid} is the session's runtime or one of its helpers; "
+                "stop the session instead",
+            )
+        details: dict[str, Any] = {
+            "pid": pid, "role": row["role"], "signal": str(signal_name).upper(),
+            "tree": bool(tree), "command": row["command"], "task_id": row.get("task_id"),
+        }
+        agent_id = row.get("agent_id")
+        if row["role"] == "background" and agent_id:
+            rec = self.agents.get(session_id, agent_id)
+            if rec is not None and not rec.terminal:
+                try:
+                    _view, stopping = await self.stop_agent(
+                        session_id, agent_id, attribution=attribution, cascade=False,
+                    )
+                except (NoRuntime, Unsupported):
+                    pass  # no runtime to ask: signal the process directly
+                else:
+                    details.update(via="agent", agent_id=agent_id, stopping=stopping)
+                    await self._log_stop_event(session_id, "process_signal", details, attribution)
+                    return {"pid": pid, "via": "agent", "agent_id": agent_id, "signalled": []}
+
+        targets: list[int] = []
+        if tree:
+            kids: dict[int, list[int]] = {}
+            for r in view["processes"]:
+                kids.setdefault(r["ppid"], []).append(r["pid"])
+
+            def visit(p: int) -> None:
+                for c in kids.get(p, ()):
+                    if c in rows and c != p:
+                        visit(c)
+                        targets.append(c)
+
+            visit(pid)
+        targets.append(pid)
+        targets = [t for t in targets if t not in (0, 1, os.getpid())
+                   and rows[t]["role"] in procs.SIGNALABLE_ROLES]
+        wanted = {t: rows[t]["start_ticks"] for t in targets}
+        signalled = self._send_signals(wanted, sig)
+        details.update(via="signal", signalled=signalled)
+        await self._log_stop_event(session_id, "process_signal", details, attribution)
+        if sig == _signal.SIGTERM and signalled and self.PROCESS_KILL_AFTER > 0:
+            if self._process_kill_tasks is None:
+                self._process_kill_tasks = set()
+            task = asyncio.create_task(self._kill_survivors(
+                {t: wanted[t] for t in signalled}, self.PROCESS_KILL_AFTER,
+            ))
+            self._process_kill_tasks.add(task)
+            task.add_done_callback(self._process_kill_tasks.discard)
+        return {"pid": pid, "via": "signal", "signalled": signalled}
+
+    def _send_signals(self, wanted: dict[int, int], sig: int) -> list[int]:
+        """Signal each pid whose start time still matches; the ones sent."""
+        scanner = self._processes()
+        sent: list[int] = []
+        for target, ticks in wanted.items():
+            if scanner.start_ticks(target) != ticks:
+                continue  # ended, or the pid was reused
+            try:
+                os.kill(target, sig)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                logger.warning("no permission to signal pid %s", target)
+                continue
+            sent.append(target)
+        return sent
+
+    async def _kill_survivors(self, wanted: dict[int, int], delay: float) -> None:
+        import signal as _signal
+
+        await asyncio.sleep(delay)
+        survivors = {p: t for p, t in wanted.items()
+                     if self._processes().start_ticks(p) == t}
+        if survivors:
+            killed = self._send_signals(survivors, _signal.SIGKILL)
+            if killed:
+                logger.info("SIGKILL after TERM timeout: %s", killed)
+
     async def agent_snapshot(self, session_id: str, *, limit: int = 200) -> dict:
         """The session's ``AgentSnapshot`` (roster, summary, capabilities,
         turn queue), as REST and ``session_status`` send it."""
@@ -3038,6 +3327,7 @@ class AgentEngine:
             "pending_wakeup_caused_by_actor_id": wakeup.get("caused_by_actor_id"),
             "has_background_tasks": self._has_live_background_tasks(session_id),
             "background_count": self.agents.live_count(session_id),
+            "process_count": self.process_count(session_id),
         })
 
     def get_codex_ultracode_run_ids(self, session_id: str) -> set[str] | None:
@@ -4176,12 +4466,13 @@ class AgentEngine:
             # Calculate per-turn cost. Semantics depend on the backend
             # (cost_is_cumulative capability):
             #
-            # * Claude: the SDK's total_cost_usd is *cumulative* per CLI
-            #   client process, NOT per-invocation.  We track the last
-            #   known cumulative value in session metadata and compute the
-            #   delta for this turn.  The counter resets whenever the
-            #   client is recycled — compute_turn_cost detects the reset
-            #   and attributes the new cumulative to this turn.
+            # * Claude: the SDK's total_cost_usd is *cumulative*, NOT
+            #   per-invocation.  We track the last known cumulative value
+            #   in session metadata and compute the delta for this turn.
+            #   A new client sets that value to where its counter starts
+            #   (_get_or_create_client).  If the counter is below it all
+            #   the same, compute_turn_cost attributes the new cumulative
+            #   to this turn.
             # * Codex: the backend returns THIS turn's nullable billed cost,
             #   explicit cost basis, and (for ChatGPT auth) a separate
             #   API-equivalent estimate. Cumulative bookkeeping stays untouched.
@@ -4201,8 +4492,8 @@ class AgentEngine:
                 )
                 if cost_source == "sdk_reset":
                     logger.info(
-                        "SDK cost counter reset for %s (%.4f < %.4f) — client "
-                        "recycle; attributing new cumulative to this turn",
+                        "SDK cost counter of %s is below its baseline "
+                        "(%.4f < %.4f); attributing new cumulative to this turn",
                         session_id, sdk_cost, prev_cumulative,
                     )
                 elif cost_source == "estimate_backstop":

@@ -1883,6 +1883,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         set((s) => ({ sessions: s.sessions.map(patch), searchResults: s.searchResults?.map(patch) ?? null }));
         return;
       }
+      // Global: how many of a session's own processes still run.
+      case 'session_processes': {
+        const patch = (sess: Session): Session => sess.id === msg.session_id
+          ? { ...sess, process_count: msg.process_count }
+          : sess;
+        set((s) => ({ sessions: s.sessions.map(patch), searchResults: s.searchResults?.map(patch) ?? null }));
+        return;
+      }
       // Superseded by the agent records; still sent by older servers.
       case 'subagent_start':
       case 'subagent_complete':

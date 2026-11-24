@@ -1187,6 +1187,7 @@ Response: {
   "status": "active",
   "is_running": true,
   "background_count": 2,
+  "process_count": 0,
   "sdk_session_id": "8fbba4a4-...",
   "connected_at": "2026-02-27T12:00:00+00:00",
   "parent_session_id": null,
@@ -1561,6 +1562,52 @@ Response: { "agent_id": "ag_…", "text": "…", "size": 24, "truncated": false,
 ```
 
 Errors: `404 agent_not_found`; `409 not_a_shell` (not a shell or monitor).
+
+#### `GET /api/sessions/{id}/processes`
+The OS processes the session started, read from `/proc` (Linux only;
+elsewhere `{"supported": false, "processes": []}`). A process belongs to
+the session when it descends from the session's live runtime subprocess,
+or when its environment carries `NERVE_SESSION_ID=<id>` (the backends set
+it, and every command inherits it), so a process left running after its
+shell exited is still found, also when the session has no runtime.
+`role`: `cli` (the runtime), `call` (a Bash call; its stdout is the CLI's
+`tasks/<task_id>.output`), `background` (a background shell or monitor;
+`agent_id` names the record), `internal` (the CLI's own children: MCP
+servers, hooks) or `orphan` (tagged, outside the live tree). Environment
+content is never returned; `command` is redacted (known secret values,
+`Authorization`/`Bearer`, `--password=`-style flags, `X_TOKEN=` assignments,
+URL passwords, common token prefixes) and cut at 2 KiB. `cpu_percent` is
+the share since the previous scan (`null` on the first); scans are cached
+for 1 s.
+
+```json
+Response: { "session_id": "…", "supported": true, "root_pid": 4242,
+            "scanned_at": "2026-…Z",
+            "processes": [{ "pid": 4250, "ppid": 4242, "role": "call",
+              "task_id": "bxyz12345", "agent_id": null, "name": "sleep",
+              "state": "S", "start_ticks": 912345, "started_at": "2026-…",
+              "cpu_seconds": 0.01, "cpu_percent": 0.0, "rss_bytes": 1048576,
+              "threads": 1, "cwd": "/root/ws", "command": "sleep 60" }] }
+```
+
+Errors: `404 session_not_found`.
+
+#### `POST /api/sessions/{id}/processes/{pid}/signal`
+Send `TERM` (the default) or `KILL` to one of the session's processes;
+`tree` also signals its descendants in the session, leaves first. Re-scans
+first. A `TERM` is followed by `KILL` after 5 s for whatever still runs. A
+live background shell or monitor is stopped through its agent stop
+(`via: "agent"`). Writes a `process_signal` session event.
+
+```json
+Request:  { "signal": "TERM", "start_ticks": 912345, "tree": true }
+Response: { "pid": 4250, "via": "signal", "signalled": [4251, 4250] }
+```
+
+Errors: `404 process_not_found` (not the session's, or ended); `409
+process_changed` (`start_ticks` differs: the pid was reused); `403
+not_signalable` (`cli`, `internal`, PID 1 or Nerve itself: stop the session
+instead); `422 bad_signal` / `bad_start_ticks`; `501 processes_unsupported`.
 
 #### `POST /api/sessions/{id}/agents/{agent_id}/stop`
 Stop one agent through the runtime's per-task stop; with `cascade` (the
@@ -2615,6 +2662,10 @@ those for another session. Events marked *global* go to every socket.
 { type: "agent_event", session_id: "s-1234", agent_id: "ag_3f9a1c2b7d4e", item: AgentEventItem }
 // Live-agent counts changed between turns (global, debounced 1 s)
 { type: "session_agents", session_id: "s-1234", background_count: 5, has_background_tasks: true }
+// The count of a session's own running processes (calls, background shells,
+// processes left running) changed (global, checked every 5 s; Linux only).
+// GET /api/sessions rows and session_running carry process_count too.
+{ type: "session_processes", session_id: "s-1234", process_count: 3 }
 // The turn queue: the full queue, plus what just left it (never buffered)
 { type: "queue_update", session_id: "s-1234", queue: [QueueEntryView], removed?: [{ queue_id: "q_9c1d2e3f" | null, client_msg_id: "4b6f…" | null, reason: "started" | "cancelled" | "duplicate" | "refused" }] }
 // "refused": Nerve is shutting down and did not run the message (an error event follows)

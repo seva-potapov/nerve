@@ -4,6 +4,7 @@ import {
 } from './hosted';
 import type {
   AgentDetail, AgentOutput, AgentSnapshot, AgentTranscriptPage, ForceStopResult, QueueEntryView,
+  SessionProcesses, SignalProcessResult,
   StopAgentResponse, StopAllResult, StopTurnResult,
 } from '../types/agents';
 import type { PullRequestResult } from '../types/github';
@@ -1595,6 +1596,18 @@ export const api = {
     request<StopAgentResponse>(
       `/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}/stop`,
       { method: 'POST', body: JSON.stringify({ cascade }) },
+    ),
+  /** The OS processes the session started (Linux only: `supported`). */
+  getSessionProcesses: (sessionId: string) =>
+    request<SessionProcesses>(`/sessions/${encodeURIComponent(sessionId)}/processes`),
+  /** Signal one of the session's processes; `start_ticks` guards against a reused pid. */
+  signalProcess: (
+    sessionId: string, pid: number,
+    body: { signal?: 'TERM' | 'KILL'; start_ticks: number; tree?: boolean },
+  ) =>
+    request<SignalProcessResult>(
+      `/sessions/${encodeURIComponent(sessionId)}/processes/${pid}/signal`,
+      { method: 'POST', body: JSON.stringify(body) },
     ),
   /** Stop the turn, every agent, or (force) the session's runtime. */
   stopSession: (sessionId: string, body: StopSessionBody) =>

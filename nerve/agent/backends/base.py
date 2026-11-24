@@ -223,6 +223,12 @@ class AgentClient(Protocol):
 
     def is_alive(self) -> bool: ...
 
+    def process_pid(self) -> int | None:
+        """The pid of the runtime's subprocess while it runs (the root of
+        the session's process tree, see nerve.agent.processes), or ``None``
+        when there is none or it is not known."""
+        return None
+
     # -- autonomous/idle stream (only when supports_idle_stream) ------- #
 
     def try_receive_idle_events(self) -> "list[AgentEvent] | None":
@@ -273,6 +279,16 @@ class AgentBackend(Protocol):
 
         Backends without a cheap check return True and rely on
         ``create_client``'s resume-miss recovery instead.
+        """
+        ...
+
+    def cost_counter_start(self, native_id: str, cwd: str) -> float:
+        """The value at which the cost counter of a new client starts when
+        the client resumes the conversation *native_id* or forks from it.
+
+        Optional, and only for backends with ``cost_is_cumulative``: the
+        engine takes a backend without it to start every counter at zero.
+        May read files, so the engine calls it in a thread.
         """
         ...
 

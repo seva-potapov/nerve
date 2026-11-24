@@ -59,7 +59,8 @@ const byUpdatedDesc = (a: Session, b: Session) =>
  * falls back to idle); only its dot differs, so "working now" still reads
  * apart from "will pick itself back up".
  */
-const isParked = (s: Session) => !!s.pending_wakeup_at || !!s.has_background_tasks;
+const isParked = (s: Session) =>
+  !!s.pending_wakeup_at || !!s.has_background_tasks || (s.process_count ?? 0) > 0;
 
 /** Drag-to-nest wiring shared by every draggable session row. */
 type RowDnd = {
@@ -993,6 +994,8 @@ function parkedTitle(session: Session, scheduledBy: string | null): string {
   const agents = session.background_count ?? 0;
   if (agents > 0) parts.push(`${agents} agent${agents === 1 ? '' : 's'} running`);
   else if (session.has_background_tasks) parts.push('Background job running');
+  const processes = session.process_count ?? 0;
+  if (processes > 0) parts.push(`${processes} process${processes === 1 ? '' : 'es'} running`);
   if (session.pending_wakeup_at) {
     const at = parseTimestamp(session.pending_wakeup_at);
     const time = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

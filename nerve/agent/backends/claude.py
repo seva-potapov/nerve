@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import math
 import os
 import re
 import stat
@@ -62,6 +64,7 @@ from nerve.agent.backends.base import (
     config_excluded_tools,
 )
 from nerve.agent.backends.images import validate_image_data, validate_image_file
+from nerve.agent import processes
 from nerve.agent.cache_policy import cache_ttl_env
 from nerve.agent.interactive import (
     FILE_MODIFY_TOOLS,
@@ -154,6 +157,63 @@ def _long_project_dir_names(projects: str, encoded: str) -> list[str]:
             return [e.name for e in entries if e.name.startswith(prefix)]
     except FileNotFoundError:
         return []
+
+
+# A CLI process that ends normally writes the total of its cost counter to
+# the session's history, as an entry of this type. A process that resumes
+# the session, or forks from it, starts its counter at the last such entry.
+_COST_STATE_TYPE = "cost-state"
+_COST_STATE_MARK = b'"' + _COST_STATE_TYPE.encode() + b'"'
+_HISTORY_CHUNK = 1 << 20
+
+
+def _saved_cost(line: bytes) -> float | None:
+    """Return the total of a cost entry of the history, or None when
+    *line* is any other entry."""
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(entry, dict) or entry.get("type") != _COST_STATE_TYPE:
+        return None
+    total = entry.get("totalCostUSD")
+    if isinstance(total, bool) or not isinstance(total, (int, float)):
+        return None
+    if not math.isfinite(total) or total < 0:
+        return None
+    return float(total)
+
+
+def _last_saved_cost(path: str) -> float:
+    """Return the total of the last cost entry in the history file at
+    *path*, or 0.0 when the file has none.
+
+    Reads the file from its end, because a process that ended normally
+    wrote its entry last.
+    """
+    with open(path, "rb") as history:
+        pos = history.seek(0, os.SEEK_END)
+        # The end of a line whose start is in an earlier chunk.
+        rest = b""
+        while pos > 0:
+            size = min(_HISTORY_CHUNK, pos)
+            pos -= size
+            history.seek(pos)
+            data = history.read(size) + rest
+            if pos > 0:
+                first_end = data.find(b"\n")
+                if first_end < 0:
+                    rest = data
+                    continue
+                rest, data = data[:first_end], data[first_end + 1:]
+            if _COST_STATE_MARK not in data:
+                continue
+            for line in reversed(data.split(b"\n")):
+                if _COST_STATE_MARK in line:
+                    total = _saved_cost(line)
+                    if total is not None:
+                        return total
+    return 0.0
 
 
 # ------------------------------------------------------------------ #
@@ -278,7 +338,8 @@ def translate_message(message: Any) -> list[ev.AgentEvent]:
             native_session_id=message.session_id,
             model=None,  # claude reports the model per AssistantMessage
             usage=usage,
-            # Cumulative per CLI process — the engine diffs it
+            # A running total, which a process that resumes a
+            # conversation continues — the engine diffs it
             # (cost_is_cumulative capability).
             total_cost_usd=getattr(message, "total_cost_usd", None),
             duration_ms=getattr(message, "duration_ms", None),
@@ -595,27 +656,60 @@ class ClaudeBackend:
         attempt the resume and let the CLI surface the real error.
         """
         try:
-            projects = os.path.expanduser("~/.claude/projects")
-            bases = [os.path.realpath(cwd)]
-            if cwd not in bases:
-                bases.append(cwd)
-            for base in bases:
-                encoded = _encode_project_dir(base)
-                if len(encoded) <= _PROJECT_DIR_MAX_LEN:
-                    names = [encoded]
-                else:
-                    names = _long_project_dir_names(projects, encoded)
-                for name in names:
-                    jsonl = projects + "/" + name + "/" + native_id + ".jsonl"
-                    if os.path.isfile(jsonl):
-                        return True
-            return False
+            return self._history_file(native_id, cwd) is not None
         except Exception as e:
             logger.debug(
                 "Could not stat resume jsonl for %s: %s, assuming present",
                 native_id[:12], e,
             )
             return True
+
+    def _history_file(self, native_id: str, cwd: str) -> str | None:
+        """Return the path of the conversation .jsonl of *native_id*, or
+        None when this filesystem has none (see
+        :meth:`validate_resume_target` for where the CLI keeps it)."""
+        projects = os.path.expanduser("~/.claude/projects")
+        bases = [os.path.realpath(cwd)]
+        if cwd not in bases:
+            bases.append(cwd)
+        for base in bases:
+            encoded = _encode_project_dir(base)
+            if len(encoded) <= _PROJECT_DIR_MAX_LEN:
+                names = [encoded]
+            else:
+                names = _long_project_dir_names(projects, encoded)
+            for name in names:
+                jsonl = projects + "/" + name + "/" + native_id + ".jsonl"
+                if os.path.isfile(jsonl):
+                    return jsonl
+        return None
+
+    def cost_counter_start(self, native_id: str, cwd: str) -> float:
+        """Return the cost at which a new CLI process starts its counter
+        when it resumes the conversation *native_id* or forks from it.
+
+        A CLI process reports ``total_cost_usd`` as a running total. When
+        the process ends normally, it writes that total to the
+        conversation's history. The next process that resumes the
+        conversation, or forks from it, continues from the last total in
+        the history. A conversation whose history has no total starts at
+        zero. A process that is still running, or that was killed, wrote
+        no total for its own turns. :meth:`ClaudeClient.disconnect` kills
+        the process, so the history gets a total when the process ends by
+        itself: when its input closes or it gets SIGTERM, as at a stop of
+        the gateway.
+
+        Returns 0.0 when the history has no total or cannot be read.
+        """
+        try:
+            path = self._history_file(native_id, cwd)
+            return _last_saved_cost(path) if path else 0.0
+        except Exception as e:
+            logger.warning(
+                "Could not read the saved cost of %s: %s; the counter is "
+                "taken to start at zero", native_id[:12], e,
+            )
+            return 0.0
 
     # -- client construction ------------------------------------------- #
 
@@ -747,6 +841,7 @@ class ClaudeBackend:
             # CLAUDE_CODE_DISABLE_CRON env var set in ``_build_env``.
             disallowed_tools=["CronCreate", "CronList", "CronDelete"],
             env=self._build_env(
+                session_id=spec.session_id,
                 cache_ttl=spec.cache_ttl,
                 inference_principal=spec.inference_principal,
                 inference_trigger=spec.inference_trigger,
@@ -856,8 +951,13 @@ class ClaudeBackend:
     def _build_env(
         self, cache_ttl: str = "5m", inference_principal: str | None = None,
         inference_trigger: str | None = None, inference_origin: str | None = None,
+        session_id: str | None = None,
     ) -> dict[str, str]:
         """Build environment variables for the SDK subprocess.
+
+        ``session_id`` tags the CLI and everything it starts with
+        ``NERVE_SESSION_ID`` (see nerve.agent.processes): the tag ties a
+        process to its session after its shell exited.
 
         ``inference_principal``, ``inference_trigger`` and
         ``inference_origin``: the principal, the trigger and the origin that
@@ -874,6 +974,8 @@ class ClaudeBackend:
         # wakeup timing (PostToolUse capture + cron-service sweep). The
         # tool itself stays available (this flag only gates the firing).
         env["CLAUDE_CODE_DISABLE_CRON"] = "1"
+        if session_id:
+            env[processes.TAG_ENV] = session_id
         # Agent teams: gates the CLI's ``SendMessage`` tool. Without it the
         # Agent tool still tells the model to resume sub-agents via
         # SendMessage — in its own description and in every spawn result —
@@ -1830,6 +1932,15 @@ class ClaudeClient(AgentClient):
                 }
             raise BackendError(detail or f"the tool call failed ({code})")
         return answer
+
+    def process_pid(self) -> int | None:
+        """The CLI subprocess's pid while it runs, else ``None``."""
+        transport = getattr(self._sdk, "_transport", None)
+        process = getattr(transport, "_process", None) if transport else None
+        if process is None or getattr(process, "returncode", 0) is not None:
+            return None
+        pid = getattr(process, "pid", None)
+        return pid if isinstance(pid, int) and pid > 0 else None
 
     def is_alive(self) -> bool:
         transport = getattr(self._sdk, "_transport", None)

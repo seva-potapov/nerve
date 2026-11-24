@@ -63,7 +63,7 @@ export type WSMessage =
   // work, and the sidebar redraws that row straight from the event (it skips
   // the list refetch for the active session).
   // `background_count` is the number of live agents of the session.
-  | { type: 'session_running'; session_id: string; is_running: boolean; pending_wakeup_at?: string | null; pending_wakeup_created_by_actor_id?: string | null; pending_wakeup_caused_by_actor_id?: string | null; has_background_tasks?: boolean; background_count?: number }
+  | { type: 'session_running'; session_id: string; is_running: boolean; pending_wakeup_at?: string | null; pending_wakeup_created_by_actor_id?: string | null; pending_wakeup_caused_by_actor_id?: string | null; has_background_tasks?: boolean; background_count?: number; process_count?: number }
   | { type: 'session_awaiting_input'; session_id: string; awaiting: boolean }
   // Kept by the server for one release for old tabs; the agent roster replaces it.
   | { type: 'background_tasks_update'; session_id: string; tasks: { task_id: string; label: string; tool: string; status: 'running' | 'done' | 'failed' | 'timeout' }[] }
