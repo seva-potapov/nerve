@@ -1411,17 +1411,19 @@ Response: { "text": "Session 1a2b3c4d: Weekly review\nModel: claude-opus-5-5 · 
 
 #### `POST /api/sessions/{id}/btw`
 `/btw`: answers a question about the session now, from its last 40 messages,
-with Nerve's own Messages API client and the session's model (`agent.model`
-for a non-Claude session). The answer is not added to the session and does
-not wait for its turn. `cost_usd` is the list-price estimate of the call.
-`404` unknown session; `400` empty question or no API credential (an API
-key, Bedrock or the proxy; a subscription token only runs the agent); `502`
-the model call failed or timed out.
+with the session's model (`agent.model` for a non-Claude session). The answer
+is not added to the session and does not wait for its turn. Nerve's own
+Messages API client asks when it has a credential and the API takes the
+call (`via: "api"`, `cost_usd` the list-price estimate); otherwise a one-shot
+Claude CLI run without tools, settings files or MCP servers asks with the
+agent's own credential (`via: "cli"`, `cost_usd` the CLI's figure). `404`
+unknown session; `400` empty question; `502` the model call failed or timed
+out.
 
 ```json
 Request:  { "question": "Where is it at?" }
 Response: { "answer": "…", "model": "claude-opus-5-5", "input_tokens": 9120,
-            "output_tokens": 84, "cost_usd": 0.038 }
+            "output_tokens": 84, "cost_usd": 0.038, "via": "cli" }
 ```
 
 ### Modified Files

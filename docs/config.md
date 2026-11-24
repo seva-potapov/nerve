@@ -1550,7 +1550,7 @@ costs only the menu.
 | `/context` | What fills the context window: total, auto-compact threshold, biggest categories |
 | `/status` | The session: id and title, model and effort, whether a turn runs and how many messages wait, running agents and processes, context, cost so far, when it started |
 | `/cost [today\|week\|month]` | This session's cost (US dollars), per turn model, with its tokens and cache reads; with a period, every session's cost then, per source, and the most expensive sessions. `today` starts at midnight in `timezone` |
-| `/btw <question>` | Ask about the session without waiting for its turn: Nerve's own API client answers from the last 40 messages, with the session's model (`agent.model` for a Codex session), and the answer is not added to the session. Needs an API key, Bedrock or the proxy |
+| `/btw <question>` | Ask about the session without waiting for its turn: the model answers from the last 40 messages, with the session's model (`agent.model` for a Codex session), and the answer is not added to the session. Nerve's own API client asks when it has a credential and the API takes the call; otherwise a one-shot Claude CLI run without tools, settings or MCP servers does, with the agent's own credential |
 | `/rename <title>` | Rename the session and its topics |
 | `/fork [title]` | Fork the session: in a new topic when the chat has topics, else this chat switches to the fork (`/session <id>` goes back). During a turn the fork starts from before it. Sent as a reply, it starts at the replied-to message (found through the reply routes, so messages from before routes were kept can't be used) |
 | `/retry` | Send your last message in this session again (its text; attachments aren't sent again). Refused while a turn runs |

@@ -578,13 +578,28 @@ def test_the_side_transcript_keeps_the_newest_messages():
 
 
 @pytest.mark.asyncio
-async def test_ask_side_question_needs_api_access_and_a_question(monkeypatch):
-    config = MagicMock()
+async def test_ask_side_question_needs_a_question_and_asks_the_cli_without_api_access(monkeypatch):
+    config = SimpleNamespace(agent=SimpleNamespace(model="claude-fallback"))
     with pytest.raises(sq.SideQuestionError, match="Ask a question"):
         await sq.ask_side_question(config, {}, [], "  ")
     monkeypatch.setattr(sq, "_api_client_usable", lambda c: False)
-    with pytest.raises(sq.SideQuestionError, match="API access"):
-        await sq.ask_side_question(config, {}, [], "why?")
+    cli = AsyncMock(return_value={"answer": "via cli", "input_tokens": 3, "output_tokens": 2, "cost_usd": 0.01})
+    monkeypatch.setattr(sq, "_ask_cli", cli)
+    result = await sq.ask_side_question(config, {"model": "claude-opus-5-5"}, [], "why?")
+    assert result["answer"] == "via cli" and result["via"] == "cli"
+    assert cli.await_args.args[0] == "claude-opus-5-5"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_api_call_falls_back_to_the_cli(monkeypatch):
+    monkeypatch.setattr(sq, "_api_client_usable", lambda c: True)
+    monkeypatch.setattr(sq, "_ask_direct", AsyncMock(side_effect=RuntimeError("429")))
+    monkeypatch.setattr(sq, "_ask_cli", AsyncMock(return_value={"answer": "ok", "cost_usd": 0.0}))
+    result = await sq.ask_side_question(SimpleNamespace(agent=SimpleNamespace(model="m")), {}, [], "q")
+    assert result["via"] == "cli"
+    monkeypatch.setattr(sq, "_ask_cli", AsyncMock(side_effect=sq.SideQuestionError("The model call failed: X.")))
+    with pytest.raises(sq.SideQuestionError, match="failed"):
+        await sq.ask_side_question(SimpleNamespace(agent=SimpleNamespace(model="m")), {}, [], "q")
 
 
 @pytest.mark.asyncio
@@ -617,6 +632,7 @@ async def test_ask_side_question_answers_with_the_sessions_model(monkeypatch):
         [{"role": "user", "content": "build it"}], "where are we?",
     )
     assert result["answer"] == "Step 3." and result["model"] == "claude-opus-5-5"
+    assert result["via"] == "api"
     assert "<question>\nwhere are we?\n</question>" in seen["messages"][0]["content"]
     assert result["cost_usd"] > 0
     assert sq.side_model(config, {"model": "gpt-6.2"}) == "claude-fallback"
