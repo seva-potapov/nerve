@@ -1807,6 +1807,10 @@ class AgentRegistry:
             return 0
         return sum(1 for r in st.records.values() if r.live and not r.ambient)
 
+    def live_total(self) -> int:
+        """How many live, non-ambient agents all sessions have (``/diag``)."""
+        return sum(self.live_count(sid) for sid in list(self._sessions))
+
     def any_live(self) -> bool:
         """Whether any session has a live, non-ambient agent.
 

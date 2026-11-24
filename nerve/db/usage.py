@@ -13,6 +13,17 @@ from __future__ import annotations
 #                                ENABLE_PROMPT_CACHING_1H for API key users)
 # Key: canonical model short-name substring → (input, output, cache_read,
 # cache_write_5m, cache_write_1h, web_search_per_req)
+# A turn's spend: the billed cost, else the API-equivalent estimate (Codex
+# subscription turns bill nothing), as get_session_effective_cost counts it.
+_EFFECTIVE_COST = (
+    "CASE WHEN cost_usd IS NOT NULL AND cost_usd > 0 THEN cost_usd "
+    "ELSE COALESCE(estimated_cost_usd, 0) END"
+)
+_EFFECTIVE_COST_U = (
+    "CASE WHEN u.cost_usd IS NOT NULL AND u.cost_usd > 0 THEN u.cost_usd "
+    "ELSE COALESCE(u.estimated_cost_usd, 0) END"
+)
+
 MODEL_PRICING: dict[str, tuple[float, float, float, float, float, float]] = {
     # Fable: 5.2 is the current one ($8/$40, cache reads at 0.025x = $0.20);
     # 5.1 kept the $10/$50 tier but already read the cache at 0.025x ($0.25);
@@ -159,6 +170,59 @@ class UsageStore:
                         "total_estimated_cost_usd": 0,
                         "total_web_searches": 0, "total_web_fetches": 0}
             return dict(row)
+
+    async def get_session_usage_by_model(self, session_id: str) -> list[dict]:
+        """The session's spend per turn model (``{"model", "turns",
+        "cost_usd"}``), most expensive first. A turn's sub-agents on other
+        models count under the turn's model."""
+        async with self.db.execute(
+            f"""
+            SELECT COALESCE(model, 'unknown') AS model, COUNT(*) AS turns,
+                   COALESCE(SUM({_EFFECTIVE_COST}), 0) AS cost_usd
+            FROM session_usage WHERE session_id = ?
+            GROUP BY COALESCE(model, 'unknown') ORDER BY cost_usd DESC
+            """,
+            (session_id,),
+        ) as cursor:
+            return [dict(row) async for row in cursor]
+
+    async def get_usage_since(self, since: str, *, top: int = 5) -> dict:
+        """Spend of every session since *since* (ISO time, UTC): totals, per
+        session source and the *top* most expensive sessions. Per turn the
+        billed cost, else the API-equivalent estimate."""
+        async with self.db.execute(
+            f"""
+            SELECT COUNT(*) AS turns, COUNT(DISTINCT session_id) AS sessions,
+                   COALESCE(SUM({_EFFECTIVE_COST}), 0) AS cost_usd
+            FROM session_usage WHERE datetime(created_at) >= datetime(?)
+            """,
+            (since,),
+        ) as cursor:
+            totals = dict(await cursor.fetchone())
+        async with self.db.execute(
+            f"""
+            SELECT COALESCE(s.source, 'other') AS source,
+                   COUNT(DISTINCT u.session_id) AS sessions,
+                   COALESCE(SUM({_EFFECTIVE_COST_U}), 0) AS cost_usd
+            FROM session_usage u LEFT JOIN sessions s ON s.id = u.session_id
+            WHERE datetime(u.created_at) >= datetime(?)
+            GROUP BY COALESCE(s.source, 'other') ORDER BY cost_usd DESC
+            """,
+            (since,),
+        ) as cursor:
+            by_source = [dict(row) async for row in cursor]
+        async with self.db.execute(
+            f"""
+            SELECT u.session_id AS session_id, s.title AS title,
+                   COALESCE(SUM({_EFFECTIVE_COST_U}), 0) AS cost_usd
+            FROM session_usage u LEFT JOIN sessions s ON s.id = u.session_id
+            WHERE datetime(u.created_at) >= datetime(?)
+            GROUP BY u.session_id ORDER BY cost_usd DESC LIMIT ?
+            """,
+            (since, top),
+        ) as cursor:
+            top_sessions = [dict(row) async for row in cursor]
+        return {**totals, "by_source": by_source, "top_sessions": top_sessions}
 
     async def get_session_effective_cost(self, session_id: str) -> float:
         """Best-available dollar spend for a session.

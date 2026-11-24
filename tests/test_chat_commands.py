@@ -51,8 +51,9 @@ def test_each_surface_has_its_commands():
     telegram = {c.name for c in commands_for("telegram")}
     web = {c.name for c in commands_for("web")}
     assert {"compact", "context", "new", "stop", "star", "unstar", "sessions", "plans", "doctor"} <= telegram & web
-    assert {"restart", "pair", "start", "reply", "session"} <= telegram - web
-    assert {"fork", "effort", "model", "help"} <= web - telegram
+    assert {"status", "cost", "btw", "rename", "fork", "retry", "model", "effort", "ps", "diag"} <= telegram & web
+    assert {"restart", "pair", "start", "reply", "session", "files", "file", "transcript"} <= telegram - web
+    assert web - telegram == {"help"}
     with pytest.raises(ValueError):
         commands_for("slack")
 
@@ -105,7 +106,7 @@ async def test_the_commands_route_lists_a_surface(bypass_auth):
     ) as client:
         web = (await client.get("/api/commands")).json()
         assert web["surface"] == "web"
-        assert web["commands"][2] == {
+        assert next(c for c in web["commands"] if c["name"] == "compact") == {
             "name": "compact", "args": "[instructions]",
             "help": "Summarize the conversation to free context",
         }

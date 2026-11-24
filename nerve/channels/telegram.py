@@ -52,6 +52,7 @@ from nerve.channels.router import turn_stop_note
 from nerve.channels.session_events import TurnFinished, TurnStarted
 from nerve.channels.telegram_auto_topics import AutoTopics
 from nerve.commands import telegram_menu
+from nerve.channels.telegram_commands import TelegramCommandsMixin
 from nerve.config import NerveConfig
 
 if TYPE_CHECKING:
@@ -1232,7 +1233,7 @@ def build_plan_confirm_view(
     return text, InlineKeyboardMarkup(rows)
 
 
-class TelegramChannel(BaseChannel):
+class TelegramChannel(TelegramCommandsMixin, BaseChannel):
     """Telegram bot channel.
 
     Handles the Telegram bot transport: polling, commands, auth.
@@ -1419,6 +1420,45 @@ class TelegramChannel(BaseChannel):
         ))
         app.add_handler(CommandHandler(
             "context", self._source_routed_command(self._handle_context),
+        ))
+        app.add_handler(CommandHandler(
+            "status", self._source_routed_command(self._handle_status),
+        ))
+        app.add_handler(CommandHandler(
+            "btw", self._source_routed_command(self._handle_btw),
+        ))
+        app.add_handler(CommandHandler(
+            "cost", self._source_routed_command(self._handle_cost),
+        ))
+        app.add_handler(CommandHandler(
+            "rename", self._source_routed_command(self._handle_rename),
+        ))
+        app.add_handler(CommandHandler(
+            "fork", self._source_routed_command(self._handle_fork),
+        ))
+        app.add_handler(CommandHandler(
+            "retry", self._source_routed_command(self._handle_retry),
+        ))
+        app.add_handler(CommandHandler(
+            "model", self._source_routed_command(self._handle_model),
+        ))
+        app.add_handler(CommandHandler(
+            "effort", self._source_routed_command(self._handle_effort),
+        ))
+        app.add_handler(CommandHandler(
+            "ps", self._source_routed_command(self._handle_ps),
+        ))
+        app.add_handler(CommandHandler(
+            "files", self._source_routed_command(self._handle_files),
+        ))
+        app.add_handler(CommandHandler(
+            "file", self._source_routed_command(self._handle_file),
+        ))
+        app.add_handler(CommandHandler(
+            "transcript", self._source_routed_command(self._handle_transcript),
+        ))
+        app.add_handler(CommandHandler(
+            "diag", self._source_routed_command(self._handle_diag),
         ))
         app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         app.add_handler(MessageHandler(
@@ -4373,6 +4413,11 @@ class TelegramChannel(BaseChannel):
         # /sessions inline keyboard: switch/create/list + history buttons.
         if query.data.startswith(("sess:", "sesstail:", "sesstopic:", "sesstx:")):
             await self._handle_session_button(query)
+            return
+
+        # The buttons of /model, /effort, /ps, /files and /file.
+        if query.data.startswith(("cmdfile:", "cmdmodel:", "cmdeffort:", "cmdps:")):
+            await self._handle_command_button(query)
             return
 
         # /plans inline keyboard: list/view/approve/decline/revise.

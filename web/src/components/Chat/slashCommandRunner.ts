@@ -2,6 +2,7 @@ import { api, apiErrorDetail } from '../../api/client';
 import { useChatStore } from '../../stores/chatStore';
 import { useUIStore } from '../../stores/uiStore';
 import { findSessionById } from '../../utils/findSession';
+import type { ChatMessage } from '../../types/chat';
 import { forkChat } from '../../utils/forkChat';
 import { modelLabel, type ModelEntry } from '../../utils/modelNames';
 import { DEFAULT_EFFORT_LEVELS, argKind, commandUsage, type SlashCommand } from '../../utils/slashCommands';
@@ -47,6 +48,15 @@ export function errorText(e: unknown, fallback: string): string {
     } catch { /* not a JSON body */ }
   }
   return fallback;
+}
+
+/** The text of a person's message (its text blocks), for `/retry`. */
+export function messageText(message: ChatMessage): string {
+  return message.blocks
+    .map(b => (b.type === 'text' ? (b as { content?: string }).content ?? '' : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
 }
 
 const normalize = (s: string) => s.toLowerCase().replace(/[\s._-]+/g, '');
@@ -186,6 +196,15 @@ export async function runSlashCommand(command: SlashCommand, args: string, ctx: 
 
     case 'effort': {
       const levels = command.choices ?? DEFAULT_EFFORT_LEVELS;
+      if (!args) {
+        const current = row?.effort ?? null;
+        const fallback = store.effortDefault;
+        ctx.report({
+          tone: 'info',
+          text: `Effort: ${current ?? (fallback ? `default (${fallback})` : 'default')}. Levels: ${levels.join(', ')}.`,
+        });
+        return;
+      }
       const level = args.toLowerCase();
       if (!levels.includes(level)) return fail(`Unknown effort "${args}". Use one of: ${levels.join(', ')}.`);
       if (isNew) return fail('Send a message first, then set the effort of this chat.');
@@ -201,6 +220,15 @@ export async function runSlashCommand(command: SlashCommand, args: string, ctx: 
     }
 
     case 'model': {
+      if (!args) {
+        const others = ctx.models.map(m => m.id).filter(id => id !== ctx.currentModel);
+        ctx.report({
+          tone: 'info',
+          text: `Model: ${ctx.currentModel ? modelLabel(ctx.currentModel) : 'default'}.`
+            + (others.length ? ` Others: ${others.join(', ')}.` : ''),
+        });
+        return;
+      }
       if (ctx.modelLocked) return fail(ctx.modelLocked);
       const { match, candidates } = matchModel(args, ctx.models);
       if (!match) {
@@ -219,6 +247,64 @@ export async function runSlashCommand(command: SlashCommand, args: string, ctx: 
       }
       ctx.pickModel(match.backend, match.id);
       ctx.report({ tone: 'success', text: `Model set to ${modelLabel(match.id)} for this chat.` });
+      return;
+    }
+
+    case 'status':
+    case 'cost':
+    case 'diag': {
+      const period = command.name === 'cost' ? args.trim().toLowerCase() : '';
+      const needsSession = command.name === 'status' || (command.name === 'cost' && !period);
+      if (needsSession && isNew) return fail('Send a message first: a new chat has no status or cost yet.');
+      try {
+        const { text } = await api.getCommandText(command.name, needsSession ? sessionId : null, period);
+        useUIStore.getState().showCommandOutput(`/${command.name}${period ? ` ${period}` : ''}`, text);
+      } catch (e) {
+        fail(errorText(e, `/${command.name} failed.`));
+      }
+      return;
+    }
+
+    case 'btw': {
+      if (isNew) return fail('Send a message first: a new chat has nothing to ask about.');
+      ctx.report({ tone: 'info', text: 'Asking on the side…', busy: true }, sessionId);
+      try {
+        const answer = await api.askSideQuestion(sessionId, args);
+        ctx.report(null, sessionId);
+        useUIStore.getState().showCommandOutput(
+          `/btw ${args}`.slice(0, 80),
+          `${answer.answer}\n\n(${answer.model} · $${(answer.cost_usd ?? 0).toFixed(2)} · not added to the session)`,
+        );
+      } catch (e) {
+        ctx.report({ tone: 'error', text: errorText(e, 'The side question failed.') }, sessionId);
+      }
+      return;
+    }
+
+    case 'rename': {
+      if (isNew) return fail('Send a message first, then rename the chat.');
+      try {
+        await store.renameSession(sessionId, args);
+        ctx.report({ tone: 'success', text: `Renamed to “${args}”.` });
+      } catch (e) {
+        fail(errorText(e, 'Could not rename the chat.'));
+      }
+      return;
+    }
+
+    case 'retry': {
+      if (isNew) return fail('Nothing to retry in a new chat.');
+      if (store.isStreaming) return fail('A turn is running: stop it first, or wait for it.');
+      const last = [...store.messages].reverse().find(m => m.role === 'user');
+      const text = last ? messageText(last) : '';
+      if (!text) return fail('Nothing to retry: this chat has no message from you.');
+      await store.sendMessage(text);
+      return;
+    }
+
+    case 'ps': {
+      if (isNew) return fail('Nothing runs in a new chat.');
+      store.openAgentsPanel(true);
       return;
     }
 

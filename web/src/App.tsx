@@ -40,6 +40,7 @@ import { NotificationToast } from './components/Notifications/NotificationToast'
 import { SetupBanner } from './components/Setup/SetupBanner';
 import { SetupLanding } from './components/Setup/SetupLanding';
 import { ShortcutsModal } from './components/ShortcutsModal';
+import { CommandOutputModal } from './components/CommandOutputModal';
 import { useSetupStore } from './stores/setupStore';
 import { useMcpAppsStore } from './stores/mcpAppsStore';
 
@@ -162,6 +163,7 @@ function App() {
       <SetupLanding />
       <SetupBanner />
       <ShortcutsModal />
+      <CommandOutputModal />
     </>
   );
 }

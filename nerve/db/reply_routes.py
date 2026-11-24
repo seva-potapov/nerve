@@ -51,6 +51,20 @@ class ReplyRouteStore:
             row = await cursor.fetchone()
             return row[0] if row else None
 
+    async def lookup_reply_route_entry(
+        self, channel: str, target: str, message_id: str,
+    ) -> dict | None:
+        """The route of one message with the time it was recorded
+        (``{"session_id", "created_at"}``), or None. ``/fork`` as a reply
+        uses the time to find the answer the message showed."""
+        async with self.db.execute(
+            "SELECT session_id, created_at FROM channel_reply_routes "
+            "WHERE channel = ? AND target = ? AND message_id = ?",
+            (channel, target, message_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return {"session_id": row[0], "created_at": row[1]} if row else None
+
     async def cleanup_old_reply_routes(
         self, max_age_days: int = REPLY_ROUTE_RETENTION_DAYS,
     ) -> int:

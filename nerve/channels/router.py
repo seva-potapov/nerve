@@ -21,7 +21,10 @@ from typing import Any, TYPE_CHECKING
 from nerve.agent.engine import SessionClosedError
 from nerve.agent.interactive import get_handler
 from nerve.agent.streaming import broadcaster
+from nerve.agent.side_question import MAX_MESSAGES as SIDE_MAX_MESSAGES
+from nerve.agent.side_question import SideQuestionError, ask_side_question
 from nerve.channels.access import Decision
+from nerve.channels import command_data
 from nerve.channels.base import (
     BaseChannel,
     ChannelCapability,
@@ -735,6 +738,110 @@ class ChannelRouter:
         """What fills the session's context window (``/context``), the
         shape of ``GET /api/sessions/{id}/context``; None: no such session."""
         return await self.engine.context_view(session_id)
+
+    # -- The chat commands' data and actions (see nerve.commands) -------- #
+
+    def is_running(self, session_id: str) -> bool:
+        """Whether the session runs a turn now."""
+        return self.engine.is_session_running(session_id)
+
+    async def status_info(self, session_id: str) -> dict[str, Any] | None:
+        """``/status``: see :func:`nerve.channels.command_data.status_info`."""
+        return await command_data.status_info(self.engine, session_id)
+
+    async def cost_info(self, session_id: str) -> dict[str, Any] | None:
+        """``/cost``: one session's spend."""
+        return await command_data.cost_info(self.engine, session_id)
+
+    async def period_cost_info(self, period: str, tz: str | None = None) -> dict[str, Any]:
+        """``/cost today|week|month``: every session's spend. Raises
+        ``ValueError`` for an unknown period."""
+        return await command_data.period_cost_info(self.engine, period, tz)
+
+    async def diag_info(self, tz: str | None = None) -> dict[str, Any]:
+        """``/diag``: the running Nerve's live state."""
+        return await command_data.diag_info(self.engine, tz)
+
+    async def written_files(self, session_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """``/files``: the files the session's Write/Edit calls wrote."""
+        return await command_data.written_files(self.engine, session_id, limit)
+
+    async def ps_info(self, session_id: str) -> dict[str, Any]:
+        """``/ps``: the session's live agents and processes."""
+        return await command_data.ps_info(self.engine, session_id)
+
+    async def stop_agent(self, session_id: str, agent_id: str) -> list[str]:
+        """Stop one agent of the session (and the agents it started);
+        returns the ids now stopping (empty: it had ended)."""
+        _view, stopping = await self.engine.stop_agent(session_id, agent_id)
+        return stopping
+
+    async def signal_process(
+        self, session_id: str, pid: int, start_ticks: int | None = None,
+    ) -> dict[str, Any]:
+        """Send TERM to one of the session's processes (then KILL if it
+        stays), with the engine's checks. Raises its process errors."""
+        return await self.engine.signal_session_process(
+            session_id, pid, signal_name="TERM", start_ticks=start_ticks,
+        )
+
+    async def update_session(self, session_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+        """Change a session as ``PATCH /api/sessions/{id}`` does (title,
+        model, effort), with its checks and events. Raises
+        :class:`~nerve.channels.command_data.CommandRefused` with the
+        route's message when it refuses."""
+        from fastapi import HTTPException
+
+        from nerve.gateway.routes.sessions import update_session
+
+        try:
+            return await update_session(session_id, dict(fields), actor=None)
+        except HTTPException as e:
+            detail = e.detail
+            message = detail.get("message") if isinstance(detail, dict) else detail
+            raise command_data.CommandRefused(str(message or "Refused")) from e
+
+    async def list_models(self) -> dict[str, Any]:
+        """The models a session can switch to, as ``GET /api/models``."""
+        from nerve.gateway.routes.models import list_models
+
+        return await list_models()
+
+    async def fork_session(
+        self, session_id: str, *, at_message_id: int | None = None,
+        title: str | None = None, source: str | None = None,
+    ) -> dict[str, Any]:
+        """Fork the session (whole, or at *at_message_id*); raises
+        ``ValueError`` when it can't be forked."""
+        return await self.engine.fork_session(
+            session_id, str(at_message_id) if at_message_id is not None else None,
+            title, source=source, actor=None,
+        )
+
+    async def latest_answer_at(self, session_id: str, at: str | None = None) -> int | None:
+        """The session's last answer with a native turn at or before *at*."""
+        return await self.engine.db.latest_answer_at(session_id, at)
+
+    async def last_user_message(self, session_id: str) -> dict[str, Any] | None:
+        """The session's last message from a person (``/retry``)."""
+        return await self.engine.db.last_user_message(session_id)
+
+    async def reply_route_entry(
+        self, channel: str, target: str | int, message_id: str | int,
+    ) -> dict[str, Any] | None:
+        """A channel message's session and the time it was recorded."""
+        return await self.engine.db.lookup_reply_route_entry(
+            channel, str(target), str(message_id),
+        )
+
+    async def side_question(self, session_id: str, question: str) -> dict[str, Any]:
+        """``/btw``: answer a question about the session now, outside it.
+        Raises :class:`~nerve.agent.side_question.SideQuestionError`."""
+        session = await self.engine.db.get_session(session_id)
+        if not session:
+            raise SideQuestionError("That session is no longer available.")
+        messages = await self.engine.db.get_messages(session_id, limit=SIDE_MAX_MESSAGES)
+        return await ask_side_question(self.engine.config, session, messages, question)
 
     async def set_session_starred(self, session_id: str, starred: bool) -> bool:
         """Star/unstar a session. Starred sessions are never auto-archived."""

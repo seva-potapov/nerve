@@ -78,6 +78,7 @@ describe('the command menu', () => {
     expect(options.map(o => o.textContent)).toEqual([
       expect.stringContaining('/compact [instructions]'),
       expect.stringContaining('/context'),
+      expect.stringContaining('/cost [period]'),
     ]);
     expect(options[0]).toHaveAttribute('aria-selected', 'true');
     expect(textbox()).toHaveAttribute('aria-activedescendant', options[0].id);
@@ -99,9 +100,9 @@ describe('the command menu', () => {
     await user.type(textbox(), '/co');
     await user.keyboard('{ArrowDown}');
     expect(within(menu()!).getAllByRole('option')[1]).toHaveAttribute('aria-selected', 'true');
-    await user.keyboard('{ArrowDown}');
+    await user.keyboard('{ArrowDown}{ArrowDown}');
     expect(within(menu()!).getAllByRole('option')[0]).toHaveAttribute('aria-selected', 'true');
-    await user.keyboard('{ArrowUp}{Tab}');
+    await user.keyboard('{ArrowUp}{ArrowUp}{Tab}');
     expect(textbox()).toHaveValue('/context ');
     expect(textbox()).toHaveFocus();
     expect(menu()).toBeNull();
@@ -136,8 +137,8 @@ describe('the command menu', () => {
   it('completes on Enter when the command needs an argument', async () => {
     const user = userEvent.setup();
     await renderComposer();
-    await user.type(textbox(), '/mod{Enter}');
-    expect(textbox()).toHaveValue('/model ');
+    await user.type(textbox(), '/ren{Enter}');
+    expect(textbox()).toHaveValue('/rename ');
     expect(api.updateSession).not.toHaveBeenCalled();
     expect(onSend).not.toHaveBeenCalled();
   });
@@ -284,5 +285,93 @@ describe('sending', () => {
     expect(api.updateSession).toHaveBeenCalledWith('srv1', { title: 'Weekly review' });
     expect(onNavigate).toHaveBeenLastCalledWith('/chat/srv1', { replace: true });
     expect(useChatStore.getState().activeSession).toBe('srv1');
+  });
+});
+
+describe('the answers and the side question', () => {
+  beforeEach(() => {
+    vi.mocked(api.getCommandText).mockReset();
+    vi.mocked(api.askSideQuestion).mockReset();
+    useUIStore.setState({ commandOutput: null });
+  });
+
+  it('shows /status as text in a dialog', async () => {
+    vi.mocked(api.getCommandText).mockResolvedValue({ text: 'Session s1: Chat\nModel: opus' });
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/status{Enter}');
+    expect(api.getCommandText).toHaveBeenCalledWith('status', 's1', '');
+    expect(useUIStore.getState().commandOutput).toEqual({ title: '/status', text: 'Session s1: Chat\nModel: opus' });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('asks /cost for a period without a chat, and refuses a bad one', async () => {
+    vi.mocked(api.getCommandText).mockResolvedValue({ text: 'Cost, last 7 days: $1.00' });
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/cost Week{Enter}');
+    expect(api.getCommandText).toHaveBeenCalledWith('cost', null, 'week');
+    expect(useUIStore.getState().commandOutput?.title).toBe('/cost week');
+    vi.mocked(api.getCommandText).mockRejectedValue(new Error('400: {"detail":"Unknown period \\"year\\". Use today, week or month."}'));
+    await user.type(textbox(), '/cost year{Enter}');
+    expect(await within(status()).findByText('Unknown period "year". Use today, week or month.')).toBeInTheDocument();
+  });
+
+  it('answers /btw in a dialog with what it cost, and adds nothing to the chat', async () => {
+    vi.mocked(api.askSideQuestion).mockResolvedValue({
+      answer: 'At step 3.', model: 'claude-opus-5', input_tokens: 10, output_tokens: 5, cost_usd: 0.042,
+    });
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/btw where are we?{Enter}');
+    expect(api.askSideQuestion).toHaveBeenCalledWith('s1', 'where are we?');
+    expect(useUIStore.getState().commandOutput?.text).toBe(
+      'At step 3.\n\n(claude-opus-5 · $0.04 · not added to the session)',
+    );
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('renames the chat', async () => {
+    const renameSession = vi.spyOn(useChatStore.getState(), 'renameSession').mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/rename Weekly review{Enter}');
+    expect(renameSession).toHaveBeenCalledWith('s1', 'Weekly review');
+    expect(await within(status()).findByText('Renamed to “Weekly review”.')).toBeInTheDocument();
+  });
+
+  it('sends the last message again with /retry, but not during a turn', async () => {
+    const sendMessage = vi.spyOn(useChatStore.getState(), 'sendMessage').mockResolvedValue(null);
+    useChatStore.setState({ messages: [
+      { role: 'user', blocks: [{ type: 'text', content: 'first' }] },
+      { role: 'assistant', blocks: [{ type: 'text', content: 'answer' }] },
+      { role: 'user', blocks: [{ type: 'text', content: 'do it again' }] },
+    ] });
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/retry{Enter}');
+    expect(sendMessage).toHaveBeenCalledWith('do it again');
+    sendMessage.mockClear();
+    useChatStore.setState({ isStreaming: true });
+    await user.type(textbox(), '/retry{Enter}');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('opens the Agents panel for /ps', async () => {
+    const openAgentsPanel = vi.spyOn(useChatStore.getState(), 'openAgentsPanel');
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/ps{Enter}');
+    expect(openAgentsPanel).toHaveBeenCalledWith(true);
+  });
+
+  it('lists the models and the effort levels without an argument', async () => {
+    const user = userEvent.setup();
+    await renderComposer();
+    await user.type(textbox(), '/model{Enter}');
+    expect(await within(status()).findByText(/^Model: .*Others: claude-opus-4-5, claude-haiku-4-5\.$/)).toBeInTheDocument();
+    await user.type(textbox(), '/effort{Enter}');
+    expect(await within(status()).findByText(/^Effort: default.*Levels: low, medium, high, xhigh, max\.$/)).toBeInTheDocument();
+    expect(api.updateSession).not.toHaveBeenCalled();
   });
 });

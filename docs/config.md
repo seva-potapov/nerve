@@ -1548,11 +1548,24 @@ costs only the menu.
 | `/stop` | Stop the running turn; background agents keep running |
 | `/compact [instructions]` | Summarize the conversation to free context, keeping what the instructions ask for. A session whose runtime is not running gets it started first. The bot answers "Compacting…" and edits it to the result, e.g. "Compacted: 14.5K → 2.8K tokens (of 1M)." |
 | `/context` | What fills the context window: total, auto-compact threshold, biggest categories |
+| `/status` | The session: id and title, model and effort, whether a turn runs and how many messages wait, running agents and processes, context, cost so far, when it started |
+| `/cost [today\|week\|month]` | This session's cost (US dollars), per turn model, with its tokens and cache reads; with a period, every session's cost then, per source, and the most expensive sessions. `today` starts at midnight in `timezone` |
+| `/btw <question>` | Ask about the session without waiting for its turn: Nerve's own API client answers from the last 40 messages, with the session's model (`agent.model` for a Codex session), and the answer is not added to the session. Needs an API key, Bedrock or the proxy |
+| `/rename <title>` | Rename the session and its topics |
+| `/fork [title]` | Fork the session: in a new topic when the chat has topics, else this chat switches to the fork (`/session <id>` goes back). During a turn the fork starts from before it. Sent as a reply, it starts at the replied-to message (found through the reply routes, so messages from before routes were kept can't be used) |
+| `/retry` | Send your last message in this session again (its text; attachments aren't sent again). Refused while a turn runs |
+| `/model [name]` | Without a name, the session's backend's models as buttons; with one (an id, the id without `claude-`, or the unique start of either), switch to it from the next turn. Refused while background agents run, as in the web UI |
+| `/effort [level]` | Without a level, the levels the model takes as buttons, and Default; with one, set it from the next turn. Refused while background agents run |
+| `/ps` | The session's running agents and processes, each with a stop button (TERM, then KILL), and Refresh |
+| `/files` | The files the session wrote with Write, Edit or NotebookEdit, newest first; a button sends one (up to 50 MB). Files a shell command wrote are not listed |
+| `/file [path]` | Send a workspace file, or list a folder (the workspace root without a path) with a button per entry. Paths outside the workspace, and paths `files.exclude` hides, are refused |
+| `/transcript` | The session's conversation as a Markdown file |
 | `/sessions`, `/session [id]` | Switch sessions |
 | `/star`, `/unstar` | Keep the session from closing when idle, or not |
 | `/plans` | Review pending plans |
 | `/reply <answer>` | Answer the latest pending question |
-| `/doctor` | Run the health checks |
+| `/diag` | How Nerve runs now: commit, uptime and memory; load, free RAM and disk; running sessions, agents and processes; Telegram's pending updates; sync sources; cron failures and failed MCP calls in the last 24 h; memory indexing backlog; spend today and in the last 7 days. A server that fails to connect makes no calls, so it is not reported |
+| `/doctor` | Check the configuration |
 | `/restart` | Restart Nerve (every session) |
 | `/start`, `/pair <code>` | Check the connection; pair an account |
 

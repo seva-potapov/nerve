@@ -86,6 +86,88 @@ class MessageStore:
                 )
         return msg_id
 
+    async def latest_answer_at(
+        self, session_id: str, at: str | None = None,
+    ) -> int | None:
+        """The id of the session's last answer with a native turn, stored at
+        or before *at* (any ISO time; None: now), or None.
+
+        An answer is stored before a channel sends it, so the time a sent
+        message was recorded finds the answer it showed, and the time a
+        person's message arrived finds the answer before it.
+        """
+        query = (
+            "SELECT id FROM messages WHERE session_id = ? AND role = 'assistant' "
+            "AND native_turn_id IS NOT NULL"
+        )
+        params: list = [session_id]
+        if at:
+            query += " AND datetime(created_at) <= datetime(?)"
+            params.append(at)
+        query += " ORDER BY id DESC LIMIT 1"
+        async with self.db.execute(query, params) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else None
+
+    async def last_user_message(self, session_id: str) -> dict | None:
+        """The session's last message from a person (``{"id", "content",
+        "has_attachments"}``), or None."""
+        async with self.db.execute(
+            "SELECT id, content, blocks FROM messages WHERE session_id = ? "
+            "AND role = 'user' ORDER BY id DESC LIMIT 1",
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": int(row[0]),
+            "content": row[1] or "",
+            "has_attachments": bool(row[2] and row[2] not in ("[]", "null")),
+        }
+
+    async def get_session_written_files(
+        self, session_id: str, limit: int = 20,
+    ) -> list[dict]:
+        """The files the session's Write, Edit and NotebookEdit calls touched,
+        newest first, one entry per path (``{"path", "tool", "at"}``).
+
+        Only these tools are recorded with a path: a file a shell command
+        wrote is not in the list.
+        """
+        import json as _json
+
+        async with self.db.execute(
+            "SELECT blocks, created_at FROM messages WHERE session_id = ? "
+            "AND role = 'assistant' AND blocks IS NOT NULL "
+            "AND (blocks LIKE '%\"Write\"%' OR blocks LIKE '%\"Edit\"%' "
+            "OR blocks LIKE '%\"NotebookEdit\"%') ORDER BY id DESC",
+            (session_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        seen: dict[str, dict] = {}
+        for blocks_raw, created_at in rows:
+            try:
+                blocks = _json.loads(blocks_raw)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(blocks, list):
+                continue
+            for block in reversed(blocks):
+                if not isinstance(block, dict) or block.get("type") != "tool_call":
+                    continue
+                tool = block.get("tool")
+                if tool not in ("Write", "Edit", "NotebookEdit"):
+                    continue
+                inp = block.get("input") or {}
+                path = inp.get("file_path") or inp.get("notebook_path")
+                if not isinstance(path, str) or not path or path in seen:
+                    continue
+                seen[path] = {"path": path, "tool": tool, "at": created_at}
+                if len(seen) >= limit:
+                    return list(seen.values())
+        return list(seen.values())
+
     async def get_native_turn_at_message(
         self, session_id: str, message_id: str | int,
     ) -> str | None:

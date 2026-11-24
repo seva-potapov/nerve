@@ -1559,6 +1559,20 @@ export const api = {
       method: 'POST',
       ...(instructions?.trim() ? { body: JSON.stringify({ instructions: instructions.trim() }) } : {}),
     }),
+  /** The text answer of `/status`, `/cost [period]` or `/diag`, as Telegram gives it. */
+  getCommandText: (name: string, sessionId?: string | null, args?: string) => {
+    const params = new URLSearchParams();
+    if (sessionId) params.set('session_id', sessionId);
+    if (args?.trim()) params.set('args', args.trim());
+    const query = params.toString();
+    return request<{ text: string }>(`/commands/${encodeURIComponent(name)}/text${query ? `?${query}` : ''}`);
+  },
+  /** `/btw`: a side question answered now from the session's transcript, not added to it. */
+  askSideQuestion: (sessionId: string, question: string) =>
+    request<{ answer: string; model: string; input_tokens: number; output_tokens: number; cost_usd: number }>(
+      `/sessions/${encodeURIComponent(sessionId)}/btw`,
+      { method: 'POST', body: JSON.stringify({ question }) },
+    ),
   /** The composer's slash commands (`GET /api/commands?surface=web`). */
   getCommands: () =>
     request<{ commands: Array<{ name: string; args: string; help: string; choices?: string[] }> }>(

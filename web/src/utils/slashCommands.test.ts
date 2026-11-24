@@ -72,8 +72,8 @@ describe('the command menu', () => {
   });
 
   it('filters by the typed prefix, in list order', () => {
-    expect(filterCommands(BUILTIN_COMMANDS, 'co').map(c => c.name)).toEqual(['compact', 'context']);
-    expect(filterCommands(BUILTIN_COMMANDS, 'st').map(c => c.name)).toEqual(['stop', 'star']);
+    expect(filterCommands(BUILTIN_COMMANDS, 'co').map(c => c.name)).toEqual(['compact', 'context', 'cost']);
+    expect(filterCommands(BUILTIN_COMMANDS, 'st').map(c => c.name)).toEqual(['stop', 'status', 'star']);
     expect(filterCommands(BUILTIN_COMMANDS, 'x')).toEqual([]);
     expect(filterCommands(BUILTIN_COMMANDS, '')).toHaveLength(BUILTIN_COMMANDS.length);
   });

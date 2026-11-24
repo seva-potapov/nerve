@@ -191,6 +191,17 @@ class CronStore:
         )
         return result.lastrowid
 
+    async def get_cron_failures_since(self, since: str) -> list[dict]:
+        """Runs that ended in an error since *since* (ISO time, UTC), newest
+        first: ``{"job_id", "started_at", "error"}``."""
+        async with self.db.execute(
+            "SELECT job_id, started_at, error FROM cron_logs "
+            "WHERE status = 'error' AND datetime(started_at) >= datetime(?) "
+            "ORDER BY started_at DESC, id DESC",
+            (since,),
+        ) as cursor:
+            return [dict(row) async for row in cursor]
+
     async def get_cron_logs(
         self, job_id: str | None = None, limit: int = 50, offset: int = 0,
         *, hide_empty: bool = False,

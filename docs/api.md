@@ -1398,6 +1398,32 @@ Response: {
 }
 ```
 
+#### `GET /api/commands/{name}/text`
+The answer of `/status`, `/cost` or `/diag` as text, the same text the
+Telegram bot sends; the web composer shows it in a dialog. Query:
+`session_id` (the chat; not needed for `/diag` or a `/cost` period) and
+`args` (`today`, `week` or `month` for `/cost`). `404` for another command
+or an unknown session, `400` for an unknown period.
+
+```json
+Response: { "text": "Session 1a2b3c4d: Weekly review\nModel: claude-opus-5-5 · effort max\n…" }
+```
+
+#### `POST /api/sessions/{id}/btw`
+`/btw`: answers a question about the session now, from its last 40 messages,
+with Nerve's own Messages API client and the session's model (`agent.model`
+for a non-Claude session). The answer is not added to the session and does
+not wait for its turn. `cost_usd` is the list-price estimate of the call.
+`404` unknown session; `400` empty question or no API credential (an API
+key, Bedrock or the proxy; a subscription token only runs the agent); `502`
+the model call failed or timed out.
+
+```json
+Request:  { "question": "Where is it at?" }
+Response: { "answer": "…", "model": "claude-opus-5-5", "input_tokens": 9120,
+            "output_tokens": 84, "cost_usd": 0.038 }
+```
+
 ### Modified Files
 
 #### `GET /api/sessions/{id}/modified-files`

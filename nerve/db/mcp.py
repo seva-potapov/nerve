@@ -47,6 +47,21 @@ class McpStore:
             (server_name, tool_name, session_id, duration_ms, success, error),
         )
 
+    async def get_mcp_usage_since(self, since: str) -> list[dict]:
+        """Calls and failed calls per MCP server since *since* (ISO time,
+        UTC): ``{"server", "calls", "failures"}``. A server that fails to
+        connect makes no calls, so it does not show up here."""
+        async with self.db.execute(
+            "SELECT server_name, COUNT(*), SUM(CASE WHEN success THEN 0 ELSE 1 END) "
+            "FROM mcp_tool_usage WHERE datetime(created_at) >= datetime(?) "
+            "GROUP BY server_name ORDER BY server_name",
+            (since,),
+        ) as cursor:
+            return [
+                {"server": r[0], "calls": int(r[1] or 0), "failures": int(r[2] or 0)}
+                async for r in cursor
+            ]
+
     async def get_mcp_server_stats(self) -> list[dict]:
         """List all MCP servers with aggregated usage stats."""
         async with self.db.execute("""

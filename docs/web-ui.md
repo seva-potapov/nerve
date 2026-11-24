@@ -103,7 +103,7 @@ On a phone (narrower than 768 px), a bar at the bottom replaces the nav rail: **
 ### Slash commands
 The composer takes the same commands as the Telegram bot, so the chat can be driven from the keyboard alone.
 
-- **Menu**: `/` at the very start of the message box opens a list of the commands above it, filtered by what follows (`/co` shows `/compact` and `/context`). `↑ ↓` select, `Tab` completes (`/compact `), `Enter` runs the selected command, or completes it when it needs an argument, and `Esc` closes the list and keeps the text. While the list is closed, `↑ ↓` recall earlier prompts and `↓` in an empty box opens the agents panel as before. While you type a command's argument, its usage shows above the box.
+- **Menu**: `/` at the very start of the message box opens a list of the commands above it, filtered by what follows (`/co` shows `/compact`, `/context` and `/cost`). `↑ ↓` select, `Tab` completes (`/compact `), `Enter` runs the selected command, or completes it when it needs an argument, and `Esc` closes the list and keeps the text. While the list is closed, `↑ ↓` recall earlier prompts and `↓` in an empty box opens the agents panel as before. While you type a command's argument, its usage shows above the box.
 - **What is a command**: a message is a command only when its first word is exactly a command's name (`/compact`, `/compact keep the PR numbers`). Anything else goes to the model unchanged: a path (`/root/nerve-workspace/x is broken`), an unknown word (`/compactfoo`), another letter case (`/Compact`), a command that takes no argument followed by more text (`/plans for tomorrow: …`), and a message with quotes or attachments. To send a message that starts with a command's name, start it with `//`: one slash is removed, so `//compact` sends `/compact`.
 - **Feedback**: what a command did shows in one line above the message box (read out by screen readers), for example "Compacted: 14.5k → 2.8k tokens" or the server's message when it refuses. It never goes into the chat or to the model. A success goes after a few seconds; an error stays until you type.
 - **The commands**: the list comes from [`GET /api/commands?surface=web`](api.md); when it does not load, the composer uses its own copy.
@@ -118,7 +118,13 @@ The composer takes the same commands as the Telegram bot, so the chat can be dri
 | `/fork` | Forks this chat (as `Cmd/Ctrl + Shift + F`). |
 | `/sessions` | Shows the session list with the focus in its search (as `Cmd/Ctrl + K`). |
 | `/plans`, `/doctor` | Opens the plans page, or the diagnostics. |
-| `/model <name>` | Switches this chat's model (as the model menu): an id, a menu name (`Opus 4.5`, `opus-4.5`) or the unique start of one (`haiku`). A name that fits more than one model lists them. |
+| `/status`, `/cost [period]`, `/diag` | Show the same text as the Telegram commands in a dialog: the chat's status, its cost (or every session's for `today`, `week` or `month`), or how Nerve runs now. |
+| `/btw <question>` | Asks about this chat without waiting for its turn; the answer shows in a dialog with what it cost and is not added to the chat. |
+| `/rename <title>` | Renames this chat. |
+| `/retry` | Sends your last message in this chat again (not while a turn runs). |
+| `/ps` | Opens the agents panel, which lists the chat's agents and processes with their stop buttons. |
+| `/effort [level]` | Sets this chat's effort (as the effort menu); without a level, says the current one and the levels. |
+| `/model [name]` | Switches this chat's model (as the model menu): an id, a menu name (`Opus 4.5`, `opus-4.5`) or the unique start of one (`haiku`). A name that fits more than one model lists them; without a name, says the current model and the others. |
 | `/help` | Opens the keyboard shortcuts (`Cmd/Ctrl + /`), which list the commands too. |
 
 ### Keyboard-only use
