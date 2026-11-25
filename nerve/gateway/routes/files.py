@@ -21,6 +21,11 @@ router = APIRouter(dependencies=[Depends(require_auth)])
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB per file
 MAX_TOTAL_SIZE = 50 * 1024 * 1024  # 50 MB per request
+# Upload text that goes into the prompt, per message. A file that doesn't
+# fit reaches the agent as its saved path, and the agent reads it with its
+# tools. The other channels keep no copy, so they inline a text file up to
+# MAX_TEXT_SIZE (512 KiB), which is roughly 130K tokens.
+MAX_INLINE_TEXT_SIZE = 128 * 1024
 
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 PDF_TYPES = {"application/pdf"}

@@ -69,6 +69,7 @@ from nerve.gateway.routes import (
     set_mcp_apps_serving,
     set_notification_service,
 )
+from nerve.gateway.routes.files import MAX_INLINE_TEXT_SIZE
 from nerve.mcp_server import build_manager as _build_mcp_manager, mount_deferred as _mount_mcp_deferred
 from nerve.mcp_server.loopback import McpLoopbackServer
 from nerve.observability.langfuse import (
@@ -1884,10 +1885,30 @@ pre{padding:.75rem 1rem;overflow:auto}p{margin:.75rem 0}
 """
 
 
+def _size_text(size: int) -> str:
+    return f"{size / 1024:.0f} KB" if size < 1_000_000 else f"{size / 1_000_000:.1f} MB"
+
+
+def _not_inlined_note(filename: str, size: int, path: Path) -> str:
+    """The line the agent gets for an upload that doesn't fit in the message."""
+    limit = _size_text(MAX_INLINE_TEXT_SIZE)
+    if size > MAX_INLINE_TEXT_SIZE:
+        why = f"over the {limit} inline limit"
+    else:
+        why = f"and with the files before it the message would pass its {limit} inline limit"
+    return (
+        f"[Not included: {filename} is {_size_text(size)}, {why}. "
+        f"Saved at {path}. Read it with your tools.]"
+    )
+
+
 async def _load_uploaded_files(
     db: Database, file_ids: list[str],
 ) -> tuple[list[dict], list[dict]]:
     """Load uploaded files from DB/disk into the engine image format.
+
+    Text goes in up to MAX_INLINE_TEXT_SIZE per message. A file that doesn't
+    fit is not read: the agent gets its saved path instead.
 
     Returns:
         (images, image_refs) where images is the list for engine.run(images=...)
@@ -1898,6 +1919,7 @@ async def _load_uploaded_files(
     records = await db.get_uploaded_files_by_ids(file_ids)
     images: list[dict] = []
     image_refs: list[dict] = []
+    inline_left = MAX_INLINE_TEXT_SIZE
 
     for rec in records:
         disk_path = Path(rec["disk_path"])
@@ -1905,14 +1927,14 @@ async def _load_uploaded_files(
             logger.warning("Uploaded file not found on disk: %s", disk_path)
             continue
 
-        # Multi-MB reads + base64 of uploads are blocking — off the loop.
-        data = await asyncio.to_thread(disk_path.read_bytes)
         file_type = rec["file_type"]
         media_type = rec["media_type"]
         file_id = rec["id"]
         filename = rec["filename"]
 
         if file_type in ("image", "pdf"):
+            # Multi-MB reads + base64 of uploads are blocking — off the loop.
+            data = await asyncio.to_thread(disk_path.read_bytes)
             b64 = await asyncio.to_thread(
                 lambda d=data: base64.b64encode(d).decode("utf-8"),
             )
@@ -1929,10 +1951,19 @@ async def _load_uploaded_files(
             })
         else:
             # Text file — will be appended to user message by the engine
-            try:
-                text_content = data.decode("utf-8")
-            except UnicodeDecodeError:
-                text_content = f"[Binary file: {filename}, {len(data)} bytes]"
+            size = disk_path.stat().st_size
+            if size > inline_left:
+                text_content = _not_inlined_note(filename, size, disk_path)
+            else:
+                data = await asyncio.to_thread(disk_path.read_bytes)
+                try:
+                    text_content = data.decode("utf-8")
+                    inline_left -= len(data)
+                except UnicodeDecodeError:
+                    text_content = (
+                        f"[Binary file: {filename}, {len(data)} bytes. "
+                        f"Saved at {disk_path}]"
+                    )
             images.append({
                 "type": "text_file",
                 "filename": filename,
