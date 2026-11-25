@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Plus, RefreshCw, Zap, CheckCircle, XCircle, Clock } from '../components/ui/icons';
 import { useSkillsStore, type Skill } from '../stores/skillsStore';
 import { Badge, Button, Modal, TextArea, TextField } from '../components/ui';
+import { parseServerTime } from '../utils/serverTime';
 
 function SkillCard({ skill }: { skill: Skill }) {
   const navigate = useNavigate();
@@ -58,7 +59,7 @@ function SkillCard({ skill }: { skill: Skill }) {
         {skill.last_used && (
           <div className="flex items-center gap-1">
             <Clock size={10} />
-            <span>{new Date(skill.last_used).toLocaleDateString()}</span>
+            <span>{parseServerTime(skill.last_used).toLocaleDateString()}</span>
           </div>
         )}
         {!skill.enabled && (

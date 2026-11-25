@@ -1,10 +1,11 @@
+import { parseServerTime } from './serverTime';
+
 /**
- * Parse a server timestamp into a Date. Handles both ISO 8601 strings and
- * legacy SQLite "YYYY-MM-DD HH:MM:SS" strings (which are UTC but lack a
- * timezone marker).
+ * Parse a server timestamp into a Date: ISO 8601 with or without a zone, and
+ * legacy SQLite "YYYY-MM-DD HH:MM:SS" (UTC without a marker). See parseServerTime.
  */
 export function parseTimestamp(input: string): Date {
-  return new Date(input.includes('T') ? input : input.replace(' ', 'T') + 'Z');
+  return parseServerTime(input);
 }
 
 /** Date buckets, newest first — also the sidebar's top-to-bottom order. */

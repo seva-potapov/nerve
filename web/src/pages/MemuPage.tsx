@@ -10,6 +10,7 @@ import { PageHeader } from '../components/ui/PageHeader';
 import { PaneToggle } from '../components/ui/PaneToggle';
 import { Drawer } from '../components/ui/Drawer';
 import { useIsMobile } from '../hooks/useMediaQuery';
+import { localWallClock } from '../utils/serverTime';
 
 /**
  * Memory-type identity colours. Data-driven: the map is read at runtime to
@@ -261,7 +262,7 @@ function Heatmap({ items, onDayClick, selectedDate }: { items: MemoryItem[]; onD
   const dayCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const item of items) {
-      const ds = item.happened_at || item.created_at;
+      const ds = item.happened_at || localWallClock(item.created_at);
       if (!ds) continue;
       const day = ds.substring(0, 10);
       counts[day] = (counts[day] || 0) + 1;
@@ -432,7 +433,8 @@ function TimelineView() {
     setEditingItemId, setDeletingItemId, updateItem, deleteItem } = useMemoryStore();
   const [filterDate, setFilterDate] = useState<string | null>(null);
 
-  const eventDate = (item: MemoryItem) => item.happened_at ?? item.created_at;
+  // created_at is UTC without a zone; happened_at is already the local wall clock.
+  const eventDate = (item: MemoryItem) => item.happened_at ?? localWallClock(item.created_at);
 
   const allEvents = useMemo(() => items.filter(i => i.memory_type === 'event'), [items]);
 
@@ -548,10 +550,10 @@ function SourcesView() {
 
   const grouped = useMemo(() => {
     const groups: { date: string; resources: Resource[] }[] = [];
-    const sorted = [...resources].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const sorted = [...resources].sort((a, b) => new Date(localWallClock(b.created_at)).getTime() - new Date(localWallClock(a.created_at)).getTime());
     let currentDate = '';
     for (const res of sorted) {
-      const dateKey = res.created_at?.substring(0, 10) || 'unknown';
+      const dateKey = localWallClock(res.created_at).substring(0, 10) || 'unknown';
       if (dateKey !== currentDate) { currentDate = dateKey; groups.push({ date: dateKey, resources: [] }); }
       groups[groups.length - 1].resources.push(res);
     }

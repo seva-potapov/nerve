@@ -1,5 +1,6 @@
 import cronstrue from 'cronstrue';
 import type { CronJob, CronJobStats } from '../../stores/cronStore';
+import { parseServerTime } from '../../utils/serverTime';
 
 /** Chat-page path for a session id. */
 export function chatPath(sessionId: string): string {
@@ -7,13 +8,9 @@ export function chatPath(sessionId: string): string {
 }
 
 /** Parse a timestamp string as UTC. SQLite CURRENT_TIMESTAMP produces naive
- *  strings like "2026-03-03 05:00:00" without timezone — new Date() would treat
- *  those as local time. We detect the missing indicator and force UTC. */
+ *  strings like "2026-03-03 05:00:00" without a timezone; see parseServerTime. */
 export function parseUTC(iso: string): number {
-  if (!iso.includes('Z') && !iso.includes('+') && !iso.match(/T.*-/)) {
-    return new Date(iso.replace(' ', 'T') + 'Z').getTime();
-  }
-  return new Date(iso).getTime();
+  return parseServerTime(iso).getTime();
 }
 
 export function formatRelativeTime(iso: string): string {

@@ -4,6 +4,7 @@ import { RefreshCw, Zap, CheckCircle, XCircle, Clock, Plug } from '../components
 import { Badge, Button } from '../components/ui';
 import { useMcpStore, type McpServer } from '../stores/mcpStore';
 import { formatMcpName } from '../utils/formatMcpName';
+import { parseServerTime } from '../utils/serverTime';
 
 /** Transport identity, not status — so `hue-*` rather than a feedback token. */
 const TYPE_COLORS: Record<string, string> = {
@@ -62,7 +63,7 @@ function ServerCard({ server }: { server: McpServer }) {
         {server.last_used && (
           <div className="flex items-center gap-1">
             <Clock size={10} />
-            <span>{new Date(server.last_used).toLocaleDateString()}</span>
+            <span>{parseServerTime(server.last_used).toLocaleDateString()}</span>
           </div>
         )}
       </div>

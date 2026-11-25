@@ -4,6 +4,7 @@ import { ActorLabel } from './ActorLabel';
 import { Download, FileText } from '../ui/icons';
 import { authUrl } from '../../api/hosted';
 import { formatMessageTime } from '../../utils/messageTime';
+import { parseServerTime } from '../../utils/serverTime';
 
 export function UserMessage({ message, actions, showActor = false }: {
   message: ChatMessage;
@@ -75,7 +76,7 @@ export function UserMessage({ message, actions, showActor = false }: {
         {message.created_at && (
           <div
             className="mt-1 text-right text-2xs text-text-faint tabular-nums"
-            title={new Date(message.created_at).toLocaleString()}
+            title={parseServerTime(message.created_at).toLocaleString()}
           >
             {formatMessageTime(message.created_at)}
           </div>

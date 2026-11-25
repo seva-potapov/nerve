@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Save, Trash2, Zap, CheckCircle, XCircle, Clock, FileText } from '../components/ui/icons';
 import { useSkillsStore } from '../stores/skillsStore';
 import { Badge, Button, IconButton, Modal, TextArea } from '../components/ui';
+import { parseServerTime } from '../utils/serverTime';
 
 function UsageBar({ total, success }: { total: number; success: number }) {
   if (total === 0) return null;
@@ -190,7 +191,7 @@ export function SkillDetailPage() {
               {stats.last_used && (
                 <div className="flex items-center justify-between">
                   <span className="text-xs text-text-muted">Last Used</span>
-                  <span className="text-xs text-text">{new Date(stats.last_used).toLocaleString()}</span>
+                  <span className="text-xs text-text">{parseServerTime(stats.last_used).toLocaleString()}</span>
                 </div>
               )}
             </div>
@@ -254,7 +255,7 @@ export function SkillDetailPage() {
                     </div>
                     <div className="flex items-center gap-2 text-text-dim">
                       {u.duration_ms != null && <span>{u.duration_ms}ms</span>}
-                      <span>{new Date(u.created_at).toLocaleString()}</span>
+                      <span>{parseServerTime(u.created_at).toLocaleString()}</span>
                     </div>
                   </div>
                 ))}

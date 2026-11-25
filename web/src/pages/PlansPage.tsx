@@ -4,6 +4,7 @@ import { Lightbulb } from '../components/ui/icons';
 import { usePlanStore, type Plan } from '../stores/planStore';
 import { Badge, Button, PageHeader } from '../components/ui';
 import { PlanStatusBadge } from '../components/Plans/PlanStatusBadge';
+import { localWallClock } from '../utils/serverTime';
 
 /** Plan type is identity, not status — hence `purple` rather than a feedback tone. */
 const TYPE_LABELS: Record<string, string> = {
@@ -40,7 +41,7 @@ function PlanCard({ plan }: { plan: Plan }) {
               </Badge>
             )}
             <span className="text-text-faint">v{plan.version}</span>
-            <span className="text-text-faint">{plan.created_at?.slice(0, 10)}</span>
+            <span className="text-text-faint">{localWallClock(plan.created_at).slice(0, 10)}</span>
             {plan.model && <span className="text-text-faint">{plan.model}</span>}
           </div>
         </div>

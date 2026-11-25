@@ -4,6 +4,7 @@ import { ArrowLeft, Zap, CheckCircle, XCircle, Clock, Plug } from '../components
 import { Badge, IconButton } from '../components/ui';
 import { useMcpStore } from '../stores/mcpStore';
 import { formatMcpName } from '../utils/formatMcpName';
+import { parseServerTime } from '../utils/serverTime';
 
 /** Transport identity, not status — so `hue-*` rather than a feedback token. */
 const TYPE_COLORS: Record<string, string> = {
@@ -101,7 +102,7 @@ export function McpServerDetailPage() {
                       )}
                       {t.last_used && (
                         <span className="text-text-faint">
-                          {new Date(t.last_used).toLocaleDateString()}
+                          {parseServerTime(t.last_used).toLocaleDateString()}
                         </span>
                       )}
                     </div>
@@ -133,7 +134,7 @@ export function McpServerDetailPage() {
                       <span className="text-text-faint tabular-nums">{u.duration_ms}ms</span>
                     )}
                     <span className="text-text-faint">
-                      {new Date(u.created_at).toLocaleString()}
+                      {parseServerTime(u.created_at).toLocaleString()}
                     </span>
                   </div>
                 ))}
@@ -172,7 +173,7 @@ export function McpServerDetailPage() {
                 {s.last_used && (
                   <div className="flex justify-between">
                     <span className="text-text-muted flex items-center gap-1"><Clock size={10} /> Last Used</span>
-                    <span className="text-text">{new Date(s.last_used).toLocaleDateString()}</span>
+                    <span className="text-text">{parseServerTime(s.last_used).toLocaleDateString()}</span>
                   </div>
                 )}
               </div>

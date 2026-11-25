@@ -25,7 +25,7 @@ function cleanTitle(session: Session): string {
 
 /** Format a date string as a short relative/absolute label. */
 function formatShortDate(dateStr: string): string {
-  const date = new Date(dateStr.includes('T') ? dateStr : dateStr.replace(' ', 'T') + 'Z');
+  const date = parseTimestamp(dateStr);
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const yesterdayStart = new Date(todayStart.getTime() - 86400000);

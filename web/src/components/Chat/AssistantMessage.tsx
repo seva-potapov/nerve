@@ -4,6 +4,7 @@ import type { ChatMessage } from '../../types/chat';
 import { BlockRenderer } from './BlockRenderer';
 import { PullRequestCards } from './PullRequestCards';
 import { formatMessageTime } from '../../utils/messageTime';
+import { parseServerTime } from '../../utils/serverTime';
 
 export function AssistantMessage({ message, actions }: {
   message: ChatMessage;
@@ -42,7 +43,7 @@ export function AssistantMessage({ message, actions }: {
         {message.created_at && (
           <div
             className="mt-1 text-right text-2xs text-text-faint tabular-nums"
-            title={new Date(message.created_at).toLocaleString()}
+            title={parseServerTime(message.created_at).toLocaleString()}
           >
             {formatMessageTime(message.created_at)}
           </div>
