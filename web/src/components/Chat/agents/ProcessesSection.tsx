@@ -4,6 +4,7 @@ import type { ProcessRole, SessionProcess, SessionProcesses } from '../../../typ
 import { ChevronDown, ChevronRight, Cpu } from '../../ui/icons';
 import { formatElapsed } from './agentVisuals';
 import { TwoStepStopButton } from './TwoStepStopButton';
+import { processTree, procKey, type ProcessTreeRow } from './processTree';
 
 /** How often the list refreshes while it is on screen. */
 export const PROCESS_POLL_MS = 3000;
@@ -17,6 +18,10 @@ const GROUPS: { key: string; title: string; roles: ProcessRole[]; collapsed?: bo
   { key: 'internal', title: 'CLI internals', roles: ['cli', 'internal'], collapsed: true },
 ];
 const SIGNALABLE: ReadonlySet<ProcessRole> = new Set(['call', 'background', 'orphan']);
+/** Indent per tree level, and the level where the indent stops growing
+ * (the panel is narrow). */
+const INDENT_PX = 16;
+const MAX_INDENT_LEVELS = 5;
 
 /** "512 KB", "45 MB", "1.2 GB". */
 export function formatBytes(n: number): string {
@@ -38,7 +43,8 @@ function useVisible(): boolean {
 
 /**
  * The OS processes the session started, read from the server's /proc:
- * Current call / Background / Left running / CLI internals. Polls every
+ * Current call / Background / Left running / CLI internals, each process
+ * under its parent (all open; a parent row folds its subtree). Polls every
  * 3 s while mounted (the panel is open) and the page is visible.
  */
 export function ProcessesSection({ sessionId }: { sessionId: string | null }) {
@@ -47,6 +53,7 @@ export function ProcessesSection({ sessionId }: { sessionId: string | null }) {
   const [error, setError] = useState<string | null>(null);
   const [armed, setArmed] = useState<number | null>(null);
   const [internalOpen, setInternalOpen] = useState(false);
+  const [folded, setFolded] = useState<ReadonlySet<string>>(() => new Set());
   const [notice, setNotice] = useState('');
   const armTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const live = useRef(true);
@@ -66,8 +73,18 @@ export function ProcessesSection({ sessionId }: { sessionId: string | null }) {
   useEffect(() => {
     live.current = true;
     setView(null);
+    setFolded(new Set());
     return () => { live.current = false; };
   }, [sessionId]);
+
+  const toggleFold = useCallback((key: string) => {
+    setFolded(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (!sessionId || !visible) return;
@@ -132,6 +149,9 @@ export function ProcessesSection({ sessionId }: { sessionId: string | null }) {
         const rows = procs.filter(p => g.roles.includes(p.role));
         if (rows.length === 0) return null;
         const collapsed = g.collapsed ? !internalOpen : false;
+        const tree = processTree(rows, folded);
+        // Rows get a fold-arrow column only in a group that has nesting.
+        const gutter = tree.some(r => r.childCount > 0);
         return (
           <ProcGroup
             key={g.key}
@@ -140,16 +160,23 @@ export function ProcessesSection({ sessionId }: { sessionId: string | null }) {
             collapsed={collapsed}
             onToggle={g.collapsed ? () => setInternalOpen(v => !v) : undefined}
           >
-            {rows.map(p => (
-              <ProcRow
-                key={`${p.pid}:${p.start_ticks}`}
-                proc={p}
-                nowMs={now}
-                armed={armed === p.pid}
-                onPress={SIGNALABLE.has(p.role) && p.state !== 'Z' ? () => { void press(p); } : undefined}
-                onDisarm={disarm}
-              />
-            ))}
+            {tree.map(r => {
+              const p = r.proc;
+              const key = procKey(p);
+              return (
+                <ProcRow
+                  key={key}
+                  row={r}
+                  gutter={gutter}
+                  folded={r.childCount > 0 && folded.has(key)}
+                  onFold={r.childCount > 0 ? () => toggleFold(key) : undefined}
+                  nowMs={now}
+                  armed={armed === p.pid}
+                  onPress={SIGNALABLE.has(p.role) && p.state !== 'Z' ? () => { void press(p); } : undefined}
+                  onDisarm={disarm}
+                />
+              );
+            })}
           </ProcGroup>
         );
       })}
@@ -186,9 +213,11 @@ function ProcGroup({ title, count, collapsed, onToggle, children }: {
   );
 }
 
-function ProcRow({ proc, nowMs, armed, onPress, onDisarm }: {
-  proc: SessionProcess; nowMs: number; armed: boolean; onPress?: () => void; onDisarm: () => void;
+function ProcRow({ row, gutter, folded, onFold, nowMs, armed, onPress, onDisarm }: {
+  row: ProcessTreeRow; gutter: boolean; folded: boolean; onFold?: () => void;
+  nowMs: number; armed: boolean; onPress?: () => void; onDisarm: () => void;
 }) {
+  const proc = row.proc;
   const age = proc.started_at ? formatElapsed(nowMs - Date.parse(proc.started_at)) : '';
   const meta = [
     `PID ${proc.pid}`,
@@ -196,9 +225,29 @@ function ProcRow({ proc, nowMs, armed, onPress, onDisarm }: {
     proc.cpu_percent !== null && proc.cpu_percent !== undefined ? `${proc.cpu_percent}% CPU` : null,
     formatBytes(proc.rss_bytes),
     proc.state === 'Z' ? 'zombie' : proc.state === 'R' ? 'running' : null,
+    folded && row.hidden > 0 ? `${row.hidden} hidden` : null,
   ].filter(Boolean).join(' · ');
   return (
-    <li className="flex items-start gap-2 px-3 py-1 hover:bg-surface-hover" data-process-pid={proc.pid}>
+    <li
+      className="flex items-start gap-2 pr-3 py-1 hover:bg-surface-hover"
+      style={{ paddingLeft: 12 + INDENT_PX * Math.min(row.depth, MAX_INDENT_LEVELS) }}
+      aria-level={row.depth + 1}
+      data-process-pid={proc.pid}
+      data-depth={row.depth}
+    >
+      {gutter && (onFold ? (
+        <button
+          type="button"
+          aria-expanded={!folded}
+          aria-label={folded ? `Expand PID ${proc.pid}` : `Collapse PID ${proc.pid}`}
+          onClick={onFold}
+          className="shrink-0 mt-0.5 text-text-faint hover:text-text-muted cursor-pointer"
+        >
+          {folded ? <ChevronRight size={11} aria-hidden="true" /> : <ChevronDown size={11} aria-hidden="true" />}
+        </button>
+      ) : (
+        <span className="shrink-0 w-[11px]" aria-hidden="true" />
+      ))}
       <div className="min-w-0 flex-1">
         <div className="font-mono text-xs text-text truncate" title={proc.command}>{proc.command}</div>
         <div className="text-2xs text-text-faint tabular-nums truncate" title={proc.cwd ?? undefined}>{meta}</div>
